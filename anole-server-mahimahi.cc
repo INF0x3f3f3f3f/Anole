@@ -34,10 +34,63 @@
 #include <fstream>
 #include <string>
 #include <cstdio>
+
 // #define CHANGE_TARGET 1
 #define MAX_CWND 10000
 #define MIN_CWND 4
+/******************************************************************************************/
+#include <queue>
+#include <cmath>
+/************************************参数 & 全局变量定义************************************/
+#define EXPONENT_T 0.9
+#define ALPHA 1
+#define BETA 900
+#define LAMBDA 11.35 // 三者选值都是根据vivace的
+#define MU 0.5
+std::queue<double> rtt_queue;
+double rtt_min; //  注意我这里自己设的是rtt_min
+#define THETA 0.05
+/******************************************效用函数模块**************************************/
+void maintain_queue(double newElement){ // 保持队列中恒定10个rtt
+    if (rtt_queue.size() >= 10) {
+        rtt_queue.pop();
+    }
+    rtt_queue.push(newElement);
+}
+double delta_rtt(){ // 计算 delta_rtt
+    if(rtt_queue.size() < 10) return 0;
+    std::queue<double> temp_queue = rtt_queue;
+    double result = 0;
+    for (int i = 0; i < 10; i++){
+        double element = temp_queue.front();
+        temp_queue.pop();
+        if(i & 1) result += element;
+        else result -= element;
+    }
+    return result / rtt_min / 5;
+}
+double utility_value_module(double rate){
+    // 第一部分 - 第二部分
+    double u_value = ALPHA * pow(rate, EXPONENT_T) - BETA * rate * max(0, delta_rtt());
+    // 第三部分
+    struct tcp_info info;
+    socklen_t info_length = sizeof(info);
+    getsockopt(sock_fd, IPPROTO_TCP, TCP_INFO, &info, &info_length);
+    double cur_rtt = info.tcpi_rtt;
+    if(cur_rtt / rtt_min > 1 + MU) 
+        u_value -= LAMBDA * rate * cur_rtt / rtt_min;
+    return u_value;
+}
+/****************************************计算最优发送窗口************************************/
+void cal_optimal_cwnd(){
 
+}
+/******************************************置信度模块***************************************/
+void confidence_value_module(double u, double umax, double* eta){
+    double y = u / umax + THETA; 
+    *eta = min(1, *eta * y);
+}
+/******************************************************************************************/
 int main(int argc, char **argv)
 {
     // char debug_file_name[200];
