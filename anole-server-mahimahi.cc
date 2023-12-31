@@ -42,20 +42,26 @@
 #include <queue>
 #include <cmath>
 /************************************参数 & 全局变量定义************************************/
+/**********效用模块**********/
 #define EXPONENT_T 0.9
 #define ALPHA 1
 #define BETA 900
-#define LAMBDA 11.35 // 三者选值都是根据vivace的
+#define LAMBDA 11.35 // 四者选值都是根据vivace的
 #define MU 0.5
 std::queue<double> rtt_queue;
 double rtt_min; //  注意我这里自己设的是rtt_min
+/**********最优cwnd模块**********/
+#define CWND_THRESHOLD 2
+/**********置信度模块**********/
 #define THETA 0.05
+/******************************************实现*********************************************/
 /******************************************效用函数模块**************************************/
 void maintain_queue(double newElement){ // 保持队列中恒定10个rtt
     if (rtt_queue.size() >= 10) {
         rtt_queue.pop();
     }
     rtt_queue.push(newElement);
+    return;
 }
 double delta_rtt(){ // 计算 delta_rtt
     if(rtt_queue.size() < 10) return 0;
@@ -81,14 +87,45 @@ double utility_value_module(double rate){
         u_value -= LAMBDA * rate * cur_rtt / rtt_min;
     return u_value;
 }
-/****************************************计算最优发送窗口************************************/
-void cal_optimal_cwnd(){
 
+
+/****************************************最优cwnd模块************************************/
+void equation8(){
+
+}
+void cmp_threshold(int a_cwnd, int b_cwnd, int* optimal_cwnd, double ua, double ub, double* u_optimal){ // a和b的cwnd小于threshold
+    if(ua > ub)
+        *optimal_cwnd = a_cwnd, *u_optimal = ua;
+    else 
+        *optimal_cwnd = b_cwnd, *u_optimal = ub;
+    return;
+}
+void cal_optimal_rate(int situation, int a_cwnd, int b_cwnd, int c_cwnd, int* optimal_cwnd,
+                    double ua, double ub, double uc, double* u_optimal){
+    if(situation == 1){
+        // equation8();
+        *optimal_cwnd = (a_cwnd + b_cwnd) / 2, *u_optimal = max(ua, ub); 
+    }else if(situation == 2){
+        if(b_cwnd - a_cwnd <= CWND_THRESHOLD)
+            cmp_threshold(a_cwnd, b_cwnd, optimal_cwnd, ua, ub, u_optimal);
+        else
+            // equation8();
+            *optimal_cwnd = (a_cwnd + b_cwnd) / 2, *u_optimal = max(ua, ub); 
+    }else if(situation == 3){
+        if(b_cwnd - a_cwnd <= CWND_THRESHOLD)
+            cmp_threshold(a_cwnd, b_cwnd, optimal_cwnd, ua, ub, u_optimal);
+        else // 这里根据历史记录的C推断R暂时没写进去
+            *optimal_cwnd = (a_cwnd + b_cwnd) / 2, *u_optimal = max(ua, ub); 
+    }else if(situation == 4){
+        *optimal_cwnd = (a_cwnd + b_cwnd) / 2, *u_optimal = max(ua, ub); 
+    }
+    return;
 }
 /******************************************置信度模块***************************************/
 void confidence_value_module(double u, double umax, double* eta){
     double y = u / umax + THETA; 
     *eta = min(1, *eta * y);
+    return;
 }
 /******************************************************************************************/
 int main(int argc, char **argv)
