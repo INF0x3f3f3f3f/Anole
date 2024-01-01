@@ -54,6 +54,27 @@ double rtt_min; //  注意我这里自己设的是rtt_min
 #define CWND_THRESHOLD 2
 /**********置信度模块**********/
 #define THETA 0.05
+#define ETA_ON 0.8
+#define ETA_OFF 0.6
+#define DELTA_ETA 0.01
+double eta_cl = 1;
+double eta_rl = 1;
+/*************逻辑************/
+#define TCP_CWND 38
+#define TCP_CWND_USER 39
+int CUR_CWND;
+int cur_prev_cwnd = 100;
+int cur_cl_cwnd = 100;
+int cur_rl_cwnd = 100;
+bool is_right_prev;
+bool is_right_cl;
+bool is_right_rl;
+int cur_rtt;
+struct tcp_info info_cur;
+socklen_t info_length;
+double ucl, url, uprev;
+int a_cwnd, b_cwnd, c_cwnd, optimal_cwnd;
+double ua, ub, uc, u_optimal;
 /******************************************实现*********************************************/
 /******************************************效用函数模块**************************************/
 void maintain_queue(double newElement){ // 保持队列中恒定10个rtt
@@ -75,14 +96,18 @@ double delta_rtt(){ // 计算 delta_rtt
     }
     return result / rtt_min / 5;
 }
-double utility_value_module(double rate){
+double utility_value_module(int func_cwnd, bool* flag){
+    info_length = sizeof(info_cur);
+    getsockopt(sock_fd, IPPROTO_TCP, TCP_INFO, &info_cur, &info_length);
+    cur_rtt = info_cur.tcpi_rtt;
+    double rate = func_cwnd / cur_rtt;
     // 第一部分 - 第二部分
-    double u_value = ALPHA * pow(rate, EXPONENT_T) - BETA * rate * max(0, delta_rtt());
+    double drtt = delta_rtt();
+    if(drtt > 0) *flag = true;
+    else *flag = false;
+    double u_value = ALPHA * pow(rate, EXPONENT_T) - BETA * rate * max(0, drtt);
     // 第三部分
-    struct tcp_info info;
-    socklen_t info_length = sizeof(info);
-    getsockopt(sock_fd, IPPROTO_TCP, TCP_INFO, &info, &info_length);
-    double cur_rtt = info.tcpi_rtt;
+    double cur_rtt = info_cur.tcpi_rtt;
     if(cur_rtt / rtt_min > 1 + MU) 
         u_value -= LAMBDA * rate * cur_rtt / rtt_min;
     return u_value;
@@ -90,34 +115,65 @@ double utility_value_module(double rate){
 
 
 /****************************************最优cwnd模块************************************/
+void set_cwnd(int cwnd_to_set){
+    if (setsockopt(skid, IPPROTO_TCP, TCP_CWND_USER, &cwnd_to_set, sizeof(cwnd_to_set)) < 0){
+        printf("ERROR: set TCP_CWND_USER option %s\n", strerror(errno));
+        return 1;
+    }
+    if (setsockopt(skid, IPPROTO_TCP, TCP_CWND, &cwnd_to_set, sizeof(cwnd_to_set)) < 0)
+    {
+        printf("ERROR: set TCP_CWND_USER option %s\n", strerror(errno));
+        return 1;
+    }
+}
+void change_to_abc(){
+    if(cur_cl_cwnd <= cur_rl_cwnd && cur_rl_cwnd <= cur_prev_cwnd){
+        a_cwnd = cur_cl_cwnd, b_cwnd = cur_rl_cwnd, c_cwnd = cur_prev_cwnd;
+        ua = ucl, ub = url, uc = uprev;
+    }else if(cur_cl_cwnd <= cur_prev_cwnd && cur_prev_cwnd <= cur_rl_cwnd){
+        a_cwnd = cur_cl_cwnd, b_cwnd = cur_prev_cwnd, c_cwnd = cur_rl_cwnd;
+        ua = ucl, ub = uprev, uc = url;
+    }else if(cur_rl_cwnd <= cur_cl_cwnd && cur_cl_cwnd <= cur_prev_cwnd){
+        a_cwnd = cur_rl_cwnd, b_cwnd = cur_cl_cwnd, c_cwnd = cur_prev_cwnd;
+        ua = url, ub = ucl, uc = uprev;
+    }else if(cur_rl_cwnd <= cur_prev_cwnd && cur_prev_cwnd <= cur_cl_cwnd){
+        a_cwnd = cur_rl_cwnd, b_cwnd = cur_prev_cwnd, c_cwnd = cur_cl_cwnd;
+        ua = url, ub = uprev, uc = ucl;
+    }else if(cur_prev_cwnd <= cur_cl_cwnd && cur_cl_cwnd <= cur_rl_cwnd){
+        a_cwnd = cur_prev_cwnd, b_cwnd = cur_cl_cwnd, c_cwnd = cur_rl_cwnd;
+        ua = uprev, ub = ucl, uc = url;
+    }else if(cur_prev_cwnd <= cur_rl_cwnd && cur_rl_cwnd <= cur_cl_cwnd){
+        a_cwnd = cur_prev_cwnd, b_cwnd = cur_rl_cwnd, c_cwnd = cur_cl_cwnd;
+        ua = uprev, ub = url, uc = ucl;
+    }
+}
 void equation8(){
 
 }
-void cmp_threshold(int a_cwnd, int b_cwnd, int* optimal_cwnd, double ua, double ub, double* u_optimal){ // a和b的cwnd小于threshold
+void cmp_threshold(){ // a和b的cwnd小于threshold
     if(ua > ub)
-        *optimal_cwnd = a_cwnd, *u_optimal = ua;
+        optimal_cwnd = a_cwnd, u_optimal = ua;
     else 
-        *optimal_cwnd = b_cwnd, *u_optimal = ub;
+        optimal_cwnd = b_cwnd, u_optimal = ub;
     return;
 }
-void cal_optimal_rate(int situation, int a_cwnd, int b_cwnd, int c_cwnd, int* optimal_cwnd,
-                    double ua, double ub, double uc, double* u_optimal){
+void cal_optimal_cwnd(int situation){
     if(situation == 1){
         // equation8();
-        *optimal_cwnd = (a_cwnd + b_cwnd) / 2, *u_optimal = max(ua, ub); 
+        optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub); 
     }else if(situation == 2){
         if(b_cwnd - a_cwnd <= CWND_THRESHOLD)
             cmp_threshold(a_cwnd, b_cwnd, optimal_cwnd, ua, ub, u_optimal);
         else
             // equation8();
-            *optimal_cwnd = (a_cwnd + b_cwnd) / 2, *u_optimal = max(ua, ub); 
+            optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub); 
     }else if(situation == 3){
         if(b_cwnd - a_cwnd <= CWND_THRESHOLD)
             cmp_threshold(a_cwnd, b_cwnd, optimal_cwnd, ua, ub, u_optimal);
         else // 这里根据历史记录的C推断R暂时没写进去
-            *optimal_cwnd = (a_cwnd + b_cwnd) / 2, *u_optimal = max(ua, ub); 
+            optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub); 
     }else if(situation == 4){
-        *optimal_cwnd = (a_cwnd + b_cwnd) / 2, *u_optimal = max(ua, ub); 
+        optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub);
     }
     return;
 }
@@ -519,7 +575,7 @@ void *CntThread(void *information)
         for (int i = 0; i < flow_index; i++)
         {
             got_no_zero = 0;
-            usleep(report_period * 1000);
+            usleep(report_period * 1000); // 20 * 1000 = 20000 us = 20 ms
             while (!got_no_zero && send_traffic)
             {
                 ret1 = get_orca_info(sock_for_cnt[i], &orca_info);
@@ -593,79 +649,141 @@ void *CntThread(void *information)
                     usleep(report_period * 100);
                 }
             }
-            got_alpha = false;
-            int error_cnt = 0;
-            int error2_cnt = 0;
-            while (!got_alpha && send_traffic)
-            {
-                // Get alpha from RL-Module
-                num = strtok_r(shared_memory_rl, " ", &save_ptr);
-                alpha = strtok_r(NULL, " ", &save_ptr);
-                if (num != NULL && alpha != NULL)
-                {
-                    pre_id_tmp = atoi(num);
-                    target_ratio = atoi(alpha);
-                    if (pre_id != pre_id_tmp /*&& target_ratio!=OK_SIGNAL*/)
-                    {
-                        got_alpha = true;
-                        pre_id = pre_id_tmp;
-                        target_ratio = atoi(alpha) * orca_info.cwnd / 100;
+            /******************************************逻辑***************************************/
+            /*************************************Evaluaiton stage********************************/
+            // 读取cl和rl的cwnd, cur_cl_cwnd
+            info_length = sizeof(info_cur);
+            getsockopt(sock_fd, IPPROTO_TCP, TCP_INFO, &info_cur, &info_length);
+            cur_cl_cwnd = info_cur.tcpi_snd_cwnd;
+            // 读取cl和rl的cwnd, cur_rl_cwnd
+            num = strtok_r(shared_memory_rl, " ", &save_ptr);
+            alpha = strtok_r(NULL, " ", &save_ptr);
+            if (num != NULL && alpha != NULL){
+                pre_id_tmp = atoi(num);
+                cur_rl_cwnd = atoi(alpha);
+                cur_rl_cwnd = atoi(alpha) * orca_info.cwnd / 100;
+            }
 
-                        if (target_ratio < MIN_CWND)
-                            target_ratio = MIN_CWND;
-                        ret1 = setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_CWND, &target_ratio, sizeof(target_ratio));
+            // 这里应该小流先开始，先简略，先cl后rl
+            // 先cl
+            set_cwnd(cur_cl_cwnd);
+            unsleep(10 * 1000); // 0.5RTT
 
-                        if (ret1 < 0)
-                        {
-                            DBGPRINT(0, 0, "setsockopt: for index:%d flow_index:%d ... %s (ret1:%d)\n", i, flow_index, strerror(errno), ret1);
-                            return ((void *)0);
-                        }
-                        error_cnt = 0;
-                    }
-                    else
-                    {
-                        if (error_cnt > 1000)
-                        {
-                            DBGPRINT(DBGSERVER, 0, "still no new value id:%d prev_id:%d\n", pre_id_tmp, pre_id);
-                            error_cnt = 0;
-                        }
-                        error_cnt++;
-                        usleep(1000);
-                    }
-                    error2_cnt = 0;
-                }
-                else
-                {
-                    if (error2_cnt == 50)
-                    {
-                        // DBGPRINT(0, 0, "got null values: (downlink:%s delay:%d qs:%d) Actor: %d iteration:%d\n", downlink, delay_ms, qsize, actor_id, step_it);
-                        // FIXME:
-                        // A Hack for now! Let's send a new state to get new action in case we have missed previous action. Why it happens?!
-                        if ((1 + tmp_step) == (step_it))
-                        {
-                            actor_is_dead_counter++;
-                            tmp_step = step_it;
-                            if (actor_is_dead_counter > 120)
-                            {
-                                DBGMARK(0, 0, "No valid action for 1 min. We (server of actor %d) are going down down down ...\n", actor_id);
-                                send_traffic = false;
-                            }
-                        }
-                        else
-                        {
-                            actor_is_dead_counter = 0;
-                            tmp_step = step_it;
-                        }
-                        got_alpha = true;
-                        error2_cnt = 0;
-                    }
-                    else
-                    {
-                        error2_cnt++;
-                        usleep(10000);
-                    }
+            // 后rl
+            set_cwnd(cur_rl_cwnd);
+            unsleep(10 * 1000); // 0.5RTT
+            // Uprev
+            uprev = utility_value_module(cur_prev_cwnd, &is_right_prev);
+
+            // prev 1个RTT
+            set_cwnd(cur_prev_cwnd);
+            unsleep(10 * 1000); // 0.5RTT
+            // Ucl
+            ucl = utility_value_module(cur_cl_cwnd, &is_right_cl);
+            unsleep(10 * 1000); // 0.5RTT
+            // Url
+            url = utility_value_module(cur_rl_cwnd, &is_right_rl);
+
+            /*************************************计算最优速率********************************/
+            int sum_right = 0;
+            if(is_right_cl) sum_right++;
+            if(is_right_rl) sum_right++;
+            if(is_right_prev) sum_right++;
+            change_to_abc();
+            cal_optimal_cwnd(4 - sum_right);
+            confidence_value_module(ucl, u_optimal, &eta_cl);
+            confidence_value_module(url, u_optimal, &eta_rl);
+
+            /**************************Probing Stage || Acceleration Stage************************/
+            if(eta_cl >= ETA_OFF && eta_rl >= ETA_OFF){ // Probing Stage
+                set_cwnd(optimal_cwnd);
+                cur_prev_cwnd = optimal_cwnd;
+                unsleep(40 * 1000); // 2RTT
+            }else{ // Acceleration Stage 测试的时候可以暂时先不加
+                double eta_x;
+                if(eta_cl < ETA_OFF) eta_x = eta_cl;
+                else eta_x = eta_rl;
+                while(eta_x < ETA_ON){
+                    eta_x += DELTA_ETA;
+                    set_cwnd(optimal_cwnd);
+                    cur_prev_cwnd = optimal_cwnd;
+                    confidence_value_module()
                 }
             }
+            /*************************************************************************************/
+            // got_alpha = false;
+            // int error_cnt = 0;
+            // int error2_cnt = 0;
+            // while (!got_alpha && send_traffic)
+            // {
+            //     // Get alpha from RL-Module
+            //     num = strtok_r(shared_memory_rl, " ", &save_ptr);
+            //     alpha = strtok_r(NULL, " ", &save_ptr);
+            //     if (num != NULL && alpha != NULL)
+            //     {
+            //         pre_id_tmp = atoi(num);
+            //         target_ratio = atoi(alpha);
+            //         if (pre_id != pre_id_tmp /*&& target_ratio!=OK_SIGNAL*/)
+            //         {
+            //             got_alpha = true;
+            //             pre_id = pre_id_tmp;
+            //             target_ratio = atoi(alpha) * orca_info.cwnd / 100;
+
+            //             if (target_ratio < MIN_CWND)
+            //                 target_ratio = MIN_CWND;
+            //             ret1 = setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_CWND, &target_ratio, sizeof(target_ratio));
+
+            //             if (ret1 < 0)
+            //             {
+            //                 DBGPRINT(0, 0, "setsockopt: for index:%d flow_index:%d ... %s (ret1:%d)\n", i, flow_index, strerror(errno), ret1);
+            //                 return ((void *)0);
+            //             }
+            //             error_cnt = 0;
+            //         }
+            //         else
+            //         {
+            //             if (error_cnt > 1000)
+            //             {
+            //                 DBGPRINT(DBGSERVER, 0, "still no new value id:%d prev_id:%d\n", pre_id_tmp, pre_id);
+            //                 error_cnt = 0;
+            //             }
+            //             error_cnt++;
+            //             usleep(1000);
+            //         }
+            //         error2_cnt = 0;
+            //     }
+            //     else
+            //     {
+            //         if (error2_cnt == 50)
+            //         {
+            //             // DBGPRINT(0, 0, "got null values: (downlink:%s delay:%d qs:%d) Actor: %d iteration:%d\n", downlink, delay_ms, qsize, actor_id, step_it);
+            //             // FIXME:
+            //             // A Hack for now! Let's send a new state to get new action in case we have missed previous action. Why it happens?!
+            //             if ((1 + tmp_step) == (step_it))
+            //             {
+            //                 actor_is_dead_counter++;
+            //                 tmp_step = step_it;
+            //                 if (actor_is_dead_counter > 120)
+            //                 {
+            //                     DBGMARK(0, 0, "No valid action for 1 min. We (server of actor %d) are going down down down ...\n", actor_id);
+            //                     send_traffic = false;
+            //                 }
+            //             }
+            //             else
+            //             {
+            //                 actor_is_dead_counter = 0;
+            //                 tmp_step = step_it;
+            //             }
+            //             got_alpha = true;
+            //             error2_cnt = 0;
+            //         }
+            //         else
+            //         {
+            //             error2_cnt++;
+            //             usleep(10000);
+            //         }
+            //     }
+            // }
         }
     }
     shmdt(shared_memory);
