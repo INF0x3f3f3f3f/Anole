@@ -41,6 +41,7 @@
 /******************************************************************************************/
 #include <queue>
 #include <cmath>
+#include <algorithm>
 /************************************参数 & 全局变量定义************************************/
 /**********效用模块**********/
 #define EXPONENT_T 0.9
@@ -97,6 +98,12 @@ double delta_rtt(){ // 计算 delta_rtt
     return result / rtt_min / 5;
 }
 double utility_value_module(int func_cwnd, bool* flag){
+    // 创建套接字
+    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock_fd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
+    }
     info_length = sizeof(info_cur);
     getsockopt(sock_fd, IPPROTO_TCP, TCP_INFO, &info_cur, &info_length);
     cur_rtt = info_cur.tcpi_rtt;
@@ -105,7 +112,7 @@ double utility_value_module(int func_cwnd, bool* flag){
     double drtt = delta_rtt();
     if(drtt > 0) *flag = true;
     else *flag = false;
-    double u_value = ALPHA * pow(rate, EXPONENT_T) - BETA * rate * max(0, drtt);
+    double u_value = ALPHA * pow(rate, EXPONENT_T) - BETA * rate * max(0.0, drtt);
     // 第三部分
     double cur_rtt = info_cur.tcpi_rtt;
     if(cur_rtt / rtt_min > 1 + MU) 
@@ -116,14 +123,18 @@ double utility_value_module(int func_cwnd, bool* flag){
 
 /****************************************最优cwnd模块************************************/
 void set_cwnd(int cwnd_to_set){
-    if (setsockopt(skid, IPPROTO_TCP, TCP_CWND_USER, &cwnd_to_set, sizeof(cwnd_to_set)) < 0){
-        printf("ERROR: set TCP_CWND_USER option %s\n", strerror(errno));
-        return 1;
+    // 创建套接字
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        perror("socket");
+        exit(EXIT_FAILURE);
     }
-    if (setsockopt(skid, IPPROTO_TCP, TCP_CWND, &cwnd_to_set, sizeof(cwnd_to_set)) < 0)
+    if (setsockopt(sockfd, IPPROTO_TCP, TCP_CWND_USER, &cwnd_to_set, sizeof(cwnd_to_set)) < 0){
+        printf("ERROR: set TCP_CWND_USER option %s\n", strerror(errno));
+    }
+    if (setsockopt(sockfd, IPPROTO_TCP, TCP_CWND, &cwnd_to_set, sizeof(cwnd_to_set)) < 0)
     {
         printf("ERROR: set TCP_CWND_USER option %s\n", strerror(errno));
-        return 1;
     }
 }
 void change_to_abc(){
@@ -148,7 +159,7 @@ void change_to_abc(){
     }
 }
 void equation8(){
-
+    return;
 }
 void cmp_threshold(){ // a和b的cwnd小于threshold
     if(ua > ub)
@@ -163,13 +174,13 @@ void cal_optimal_cwnd(int situation){
         optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub); 
     }else if(situation == 2){
         if(b_cwnd - a_cwnd <= CWND_THRESHOLD)
-            cmp_threshold(a_cwnd, b_cwnd, optimal_cwnd, ua, ub, u_optimal);
+            cmp_threshold();
         else
             // equation8();
             optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub); 
     }else if(situation == 3){
         if(b_cwnd - a_cwnd <= CWND_THRESHOLD)
-            cmp_threshold(a_cwnd, b_cwnd, optimal_cwnd, ua, ub, u_optimal);
+            cmp_threshold();
         else // 这里根据历史记录的C推断R暂时没写进去
             optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub); 
     }else if(situation == 4){
@@ -180,7 +191,7 @@ void cal_optimal_cwnd(int situation){
 /******************************************置信度模块***************************************/
 void confidence_value_module(double u, double umax, double* eta){
     double y = u / umax + THETA; 
-    *eta = min(1, *eta * y);
+    *eta = min(1.0, *eta * y);
     return;
 }
 /******************************************************************************************/
@@ -224,7 +235,7 @@ int main(int argc, char **argv)
     duration_steps = atoi(argv[8]);
     // fprintf(debug_file, "Initialized successfully!\n");
     // fclose(debug_file);
-
+    
     start_server(flow_num, client_port);
     DBGMARK(DBGSERVER, 5, "DONE!\n");
     shmdt(shared_memory);
@@ -294,7 +305,7 @@ void start_server(int flow_num, int client_port)
         {
             if (setsockopt(sock[i], IPPROTO_TCP, TCP_CONGESTION, scheme, strlen(scheme)) < 0)
             {
-		DBGERROR("error!!!!!!!!!!!!!!!!!!");
+		    DBGERROR("error!!!!!!!!!!!!!!!!!!");
     		DBGMARK(0, 0, "TCP congestion doesn't exist: %s\n", strerror(errno));
                 return;
             }
@@ -652,6 +663,12 @@ void *CntThread(void *information)
             /******************************************逻辑***************************************/
             /*************************************Evaluaiton stage********************************/
             // 读取cl和rl的cwnd, cur_cl_cwnd
+            // 创建套接字
+            int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (sock_fd < 0) {
+                perror("socket");
+                exit(EXIT_FAILURE);
+            }
             info_length = sizeof(info_cur);
             getsockopt(sock_fd, IPPROTO_TCP, TCP_INFO, &info_cur, &info_length);
             cur_cl_cwnd = info_cur.tcpi_snd_cwnd;
@@ -667,20 +684,20 @@ void *CntThread(void *information)
             // 这里应该小流先开始，先简略，先cl后rl
             // 先cl
             set_cwnd(cur_cl_cwnd);
-            unsleep(10 * 1000); // 0.5RTT
+            usleep(10 * 1000); // 0.5RTT
 
             // 后rl
             set_cwnd(cur_rl_cwnd);
-            unsleep(10 * 1000); // 0.5RTT
+            usleep(10 * 1000); // 0.5RTT
             // Uprev
             uprev = utility_value_module(cur_prev_cwnd, &is_right_prev);
 
             // prev 1个RTT
             set_cwnd(cur_prev_cwnd);
-            unsleep(10 * 1000); // 0.5RTT
+            usleep(10 * 1000); // 0.5RTT
             // Ucl
             ucl = utility_value_module(cur_cl_cwnd, &is_right_cl);
-            unsleep(10 * 1000); // 0.5RTT
+            usleep(10 * 1000); // 0.5RTT
             // Url
             url = utility_value_module(cur_rl_cwnd, &is_right_rl);
 
@@ -698,7 +715,7 @@ void *CntThread(void *information)
             if(eta_cl >= ETA_OFF && eta_rl >= ETA_OFF){ // Probing Stage
                 set_cwnd(optimal_cwnd);
                 cur_prev_cwnd = optimal_cwnd;
-                unsleep(40 * 1000); // 2RTT
+                usleep(40 * 1000); // 2RTT
             }else{ // Acceleration Stage 测试的时候可以暂时先不加
                 double eta_x;
                 if(eta_cl < ETA_OFF) eta_x = eta_cl;
@@ -707,7 +724,7 @@ void *CntThread(void *information)
                     eta_x += DELTA_ETA;
                     set_cwnd(optimal_cwnd);
                     cur_prev_cwnd = optimal_cwnd;
-                    confidence_value_module()
+                    // confidence_value_module()
                 }
             }
             /*************************************************************************************/
