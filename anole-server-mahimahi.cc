@@ -1,29 +1,3 @@
-//============================================================================
-// Author      : Soheil Abbasloo
-// Version     : 1.0
-//============================================================================
-
-/*
-  MIT License
-  Copyright (c) Soheil Abbasloo 2020 (ab.soheil@gmail.com)
-
-  Permission is hereby granted, free of charge, to any person obtaining a copy
-  of this software and associated documentation files (the "Software"), to deal
-  in the Software without restriction, including without limitation the rights
-  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-  copies of the Software, and to permit persons to whom the Software is
-  furnished to do so, subject to the following conditions:
-  The above copyright notice and this permission notice shall be included in all
-  copies or substantial portions of the Software.
-
-  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-  SOFTWARE.
-*/
 
 #include <cstdlib>
 #include <sys/select.h>
@@ -78,29 +52,38 @@ int a_cwnd, b_cwnd, c_cwnd, optimal_cwnd;
 double ua, ub, uc, u_optimal;
 /******************************************实现*********************************************/
 /******************************************效用函数模块**************************************/
-void maintain_queue(double newElement){ // 保持队列中恒定10个rtt
-    if (rtt_queue.size() >= 10) {
+void maintain_queue(double newElement)
+{ // 保持队列中恒定10个rtt
+    if (rtt_queue.size() >= 10)
+    {
         rtt_queue.pop();
     }
     rtt_queue.push(newElement);
     return;
 }
-double delta_rtt(){ // 计算 delta_rtt
-    if(rtt_queue.size() < 10) return 0;
+double delta_rtt()
+{ // 计算 delta_rtt
+    if (rtt_queue.size() < 10)
+        return 0;
     std::queue<double> temp_queue = rtt_queue;
     double result = 0;
-    for (int i = 0; i < 10; i++){
+    for (int i = 0; i < 10; i++)
+    {
         double element = temp_queue.front();
         temp_queue.pop();
-        if(i & 1) result += element;
-        else result -= element;
+        if (i & 1)
+            result += element;
+        else
+            result -= element;
     }
     return result / rtt_min / 5;
 }
-double utility_value_module(int func_cwnd, bool* flag){
+double utility_value_module(int func_cwnd, bool *flag)
+{
     // 创建套接字
     int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock_fd < 0) {
+    if (sock_fd < 0)
+    {
         perror("socket");
         exit(EXIT_FAILURE);
     }
@@ -110,26 +93,30 @@ double utility_value_module(int func_cwnd, bool* flag){
     double rate = func_cwnd / cur_rtt;
     // 第一部分 - 第二部分
     double drtt = delta_rtt();
-    if(drtt > 0) *flag = true;
-    else *flag = false;
+    if (drtt > 0)
+        *flag = true;
+    else
+        *flag = false;
     double u_value = ALPHA * pow(rate, EXPONENT_T) - BETA * rate * max(0.0, drtt);
     // 第三部分
     double cur_rtt = info_cur.tcpi_rtt;
-    if(cur_rtt / rtt_min > 1 + MU) 
+    if (cur_rtt / rtt_min > 1 + MU)
         u_value -= LAMBDA * rate * cur_rtt / rtt_min;
     return u_value;
 }
 
-
 /****************************************最优cwnd模块************************************/
-void set_cwnd(int cwnd_to_set){
+void set_cwnd(int cwnd_to_set)
+{
     // 创建套接字
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) {
+    if (sockfd < 0)
+    {
         perror("socket");
         exit(EXIT_FAILURE);
     }
-    if (setsockopt(sockfd, IPPROTO_TCP, TCP_CWND_USER, &cwnd_to_set, sizeof(cwnd_to_set)) < 0){
+    if (setsockopt(sockfd, IPPROTO_TCP, TCP_CWND_USER, &cwnd_to_set, sizeof(cwnd_to_set)) < 0)
+    {
         printf("ERROR: set TCP_CWND_USER option %s\n", strerror(errno));
     }
     if (setsockopt(sockfd, IPPROTO_TCP, TCP_CWND, &cwnd_to_set, sizeof(cwnd_to_set)) < 0)
@@ -137,60 +124,83 @@ void set_cwnd(int cwnd_to_set){
         printf("ERROR: set TCP_CWND_USER option %s\n", strerror(errno));
     }
 }
-void change_to_abc(){
-    if(cur_cl_cwnd <= cur_rl_cwnd && cur_rl_cwnd <= cur_prev_cwnd){
+void change_to_abc()
+{
+    if (cur_cl_cwnd <= cur_rl_cwnd && cur_rl_cwnd <= cur_prev_cwnd)
+    {
         a_cwnd = cur_cl_cwnd, b_cwnd = cur_rl_cwnd, c_cwnd = cur_prev_cwnd;
         ua = ucl, ub = url, uc = uprev;
-    }else if(cur_cl_cwnd <= cur_prev_cwnd && cur_prev_cwnd <= cur_rl_cwnd){
+    }
+    else if (cur_cl_cwnd <= cur_prev_cwnd && cur_prev_cwnd <= cur_rl_cwnd)
+    {
         a_cwnd = cur_cl_cwnd, b_cwnd = cur_prev_cwnd, c_cwnd = cur_rl_cwnd;
         ua = ucl, ub = uprev, uc = url;
-    }else if(cur_rl_cwnd <= cur_cl_cwnd && cur_cl_cwnd <= cur_prev_cwnd){
+    }
+    else if (cur_rl_cwnd <= cur_cl_cwnd && cur_cl_cwnd <= cur_prev_cwnd)
+    {
         a_cwnd = cur_rl_cwnd, b_cwnd = cur_cl_cwnd, c_cwnd = cur_prev_cwnd;
         ua = url, ub = ucl, uc = uprev;
-    }else if(cur_rl_cwnd <= cur_prev_cwnd && cur_prev_cwnd <= cur_cl_cwnd){
+    }
+    else if (cur_rl_cwnd <= cur_prev_cwnd && cur_prev_cwnd <= cur_cl_cwnd)
+    {
         a_cwnd = cur_rl_cwnd, b_cwnd = cur_prev_cwnd, c_cwnd = cur_cl_cwnd;
         ua = url, ub = uprev, uc = ucl;
-    }else if(cur_prev_cwnd <= cur_cl_cwnd && cur_cl_cwnd <= cur_rl_cwnd){
+    }
+    else if (cur_prev_cwnd <= cur_cl_cwnd && cur_cl_cwnd <= cur_rl_cwnd)
+    {
         a_cwnd = cur_prev_cwnd, b_cwnd = cur_cl_cwnd, c_cwnd = cur_rl_cwnd;
         ua = uprev, ub = ucl, uc = url;
-    }else if(cur_prev_cwnd <= cur_rl_cwnd && cur_rl_cwnd <= cur_cl_cwnd){
+    }
+    else if (cur_prev_cwnd <= cur_rl_cwnd && cur_rl_cwnd <= cur_cl_cwnd)
+    {
         a_cwnd = cur_prev_cwnd, b_cwnd = cur_rl_cwnd, c_cwnd = cur_cl_cwnd;
         ua = uprev, ub = url, uc = ucl;
     }
 }
-void equation8(){
+void equation8()
+{
     return;
 }
-void cmp_threshold(){ // a和b的cwnd小于threshold
-    if(ua > ub)
+void cmp_threshold()
+{ // a和b的cwnd小于threshold
+    if (ua > ub)
         optimal_cwnd = a_cwnd, u_optimal = ua;
-    else 
+    else
         optimal_cwnd = b_cwnd, u_optimal = ub;
     return;
 }
-void cal_optimal_cwnd(int situation){
-    if(situation == 1){
+void cal_optimal_cwnd(int situation)
+{
+    if (situation == 1)
+    {
         // equation8();
-        optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub); 
-    }else if(situation == 2){
-        if(b_cwnd - a_cwnd <= CWND_THRESHOLD)
+        optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub);
+    }
+    else if (situation == 2)
+    {
+        if (b_cwnd - a_cwnd <= CWND_THRESHOLD)
             cmp_threshold();
         else
             // equation8();
-            optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub); 
-    }else if(situation == 3){
-        if(b_cwnd - a_cwnd <= CWND_THRESHOLD)
+            optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub);
+    }
+    else if (situation == 3)
+    {
+        if (b_cwnd - a_cwnd <= CWND_THRESHOLD)
             cmp_threshold();
         else // 这里根据历史记录的C推断R暂时没写进去
-            optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub); 
-    }else if(situation == 4){
+            optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub);
+    }
+    else if (situation == 4)
+    {
         optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub);
     }
     return;
 }
 /******************************************置信度模块***************************************/
-void confidence_value_module(double u, double umax, double* eta){
-    double y = u / umax + THETA; 
+void confidence_value_module(double u, double umax, double *eta)
+{
+    double y = u / umax + THETA;
     *eta = min(1.0, *eta * y);
     return;
 }
@@ -198,7 +208,7 @@ void confidence_value_module(double u, double umax, double* eta){
 int main(int argc, char **argv)
 {
     // char debug_file_name[200];
-	// sprintf(debug_file_name, "/home/hfx/pantheon-modified-to3/third_party/orca/debug-log/server-%ld.txt", raw_timestamp());
+    // sprintf(debug_file_name, "/home/hfx/pantheon-modified-to3/third_party/orca/debug-log/server-%ld.txt", raw_timestamp());
     // FILE *debug_file = fopen(debug_file_name, "a");
     DBGPRINT(DBGSERVER, 4, "Main\n");
     if (argc != 9)
@@ -235,9 +245,25 @@ int main(int argc, char **argv)
     duration_steps = atoi(argv[8]);
     // fprintf(debug_file, "Initialized successfully!\n");
     // fclose(debug_file);
-    
+    //********************************************************************
+    std::ofstream file("1.txt");   // 创建并打开文件
+    file << "main中" << std::endl; // 写入信息
+    file.close();
+    //********************************************************************
+    //********************************************************************
+    // 以追加模式打开文件
+    std::ofstream file1("1.txt", std::ios::app);
+    file1 << "start_server开始" << std::endl; // 写入信息
+
+    //********************************************************************
     start_server(flow_num, client_port);
     DBGMARK(DBGSERVER, 5, "DONE!\n");
+    //********************************************************************
+    // 以追加模式打开文件
+    file1 << "start_server结束" << std::endl; // 写入信息
+
+    file1.close();
+    //********************************************************************
     shmdt(shared_memory);
     shmctl(shmid, IPC_RMID, NULL);
     shmdt(shared_memory_rl);
@@ -257,12 +283,28 @@ void start_server(int flow_num, int client_port)
     sInfo *info;
     info = new sInfo;
     flows = new cFlow[flow_num];
+    //********************************************************************
+    // 以追加模式打开文件
+    std::ofstream file("1.txt", std::ios::app);
+    file << "here" << std::endl; // 写入信息
+    //********************************************************************
+    file << "here*here" << std::endl; // 写入信息
+    //********************************************************************
     if (flows == NULL)
     {
+        //********************************************************************
+        // 以追加模式打开文件
+        std::ofstream file("1.txt", std::ios::app);
+        file << "error1" << std::endl; // 写入信息
+
+        file.close();
+        //********************************************************************
         DBGMARK(0, 0, "flow generation failed\n");
         return;
     }
-
+    //********************************************************************
+    file << "here2" << std::endl; // 写入信息
+    //********************************************************************
     // threads
     pthread_t data_thread;
     pthread_t cnt_thread;
@@ -287,6 +329,13 @@ void start_server(int flow_num, int client_port)
         // Init socket
         if ((sock[i] = socket(PF_INET, SOCK_STREAM, 0)) < 0)
         {
+            //********************************************************************
+            // 以追加模式打开文件
+            std::ofstream file("1.txt", std::ios::app);
+            file << "error3" << std::endl; // 写入信息
+
+            file.close();
+            //********************************************************************
             DBGMARK(0, 0, "sockopt: %s\n", strerror(errno));
             return;
         }
@@ -297,6 +346,13 @@ void start_server(int flow_num, int client_port)
         // Bind socket on IP:Port
         if (bind(sock[i], (struct sockaddr *)&server_addr[i], sizeof(struct sockaddr)) < 0)
         {
+            //********************************************************************
+            // 以追加模式打开文件
+            std::ofstream file("1.txt", std::ios::app);
+            file << "error4" << std::endl; // 写入信息
+
+            file.close();
+            //********************************************************************
             DBGMARK(0, 0, "bind error srv_ctr_ip: 000000: %s\n", strerror(errno));
             close(sock[i]);
             return;
@@ -305,11 +361,20 @@ void start_server(int flow_num, int client_port)
         {
             if (setsockopt(sock[i], IPPROTO_TCP, TCP_CONGESTION, scheme, strlen(scheme)) < 0)
             {
-		    DBGERROR("error!!!!!!!!!!!!!!!!!!");
-    		DBGMARK(0, 0, "TCP congestion doesn't exist: %s\n", strerror(errno));
+                //********************************************************************
+                // 以追加模式打开文件
+                std::ofstream file("1.txt", std::ios::app);
+                file << "error2" << std::endl; // 写入信息
+
+                file.close();
+                //********************************************************************
+                DBGMARK(0, 0, "TCP congestion doesn't exist: %s\n", strerror(errno));
                 return;
             }
         }
+        //********************************************************************
+        file << "here4" << std::endl; // 写入信息
+        //********************************************************************
     }
 
     // char container_cmd[500];
@@ -371,9 +436,14 @@ void start_server(int flow_num, int client_port)
         sprintf(cmd, "/home/`whoami`/venv/bin/python %s/d5.py --load --tb_interval=1 --base_path=%s --task=%d --job_name=actor --train_dir=%s  --mem_r=%d --mem_w=%d &", path, path, actor_id, path, (int)key, (int)key_rl);
         DBGPRINT(0, 0, "Starting RL Module (With load) ...\n%s", cmd);
     }
-
+    //********************************************************************
+    file << "here5" << std::endl; // 写入信息
+    //********************************************************************
     initial_timestamp();
     system(cmd);
+    //********************************************************************
+    file << "here6" << std::endl; // 写入信息
+    //********************************************************************
     // Wait to get OK signal (alpha=OK_SIGNAL)
     bool got_ready_signal_from_rl = false;
     int signal;
@@ -383,6 +453,9 @@ void start_server(int flow_num, int client_port)
     int signal_check_counter = 0;
     while (!got_ready_signal_from_rl)
     {
+        //********************************************************************
+        file << "in—while" << std::endl; // 写入信息
+        //********************************************************************
         // Get alpha from RL-Module
         signal_check_counter++;
         num = strtok_r(shared_memory_rl, " ", &save_ptr);
@@ -405,10 +478,16 @@ void start_server(int flow_num, int client_port)
         }
         if (signal_check_counter > 18000)
         {
+            //********************************************************************
+            file << "here9999" << std::endl; // 写入信息
+            //********************************************************************
             DBGERROR("After 3 minutes, no response (OK_Signal) from the Actor %d is received! We are going down down down ...\n", actor_id);
             return;
         }
     }
+    //********************************************************************
+    file << "here7" << std::endl; // 写入信息
+    //********************************************************************
     DBGPRINT(0, 0, "RL Module is Ready. Let's Start ...\n\n");
     usleep(actor_id * 10000 + 10000);
     // DBGPRINT(0, 0, "%s", final_cmd);
@@ -451,7 +530,9 @@ void start_server(int flow_num, int client_port)
         DBGERROR("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-==-=-=-=-=-=-=- select() Timeout! =-=-=-=-=-=--=-=-=-=-=\n");
         return;
     }
-
+    //********************************************************************
+    file << "here8" << std::endl; // 写入信息
+    //********************************************************************
     int sin_size = sizeof(struct sockaddr_in);
     while (flow_index < flow_num)
     {
@@ -665,7 +746,8 @@ void *CntThread(void *information)
             // 读取cl和rl的cwnd, cur_cl_cwnd
             // 创建套接字
             int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-            if (sock_fd < 0) {
+            if (sock_fd < 0)
+            {
                 perror("socket");
                 exit(EXIT_FAILURE);
             }
@@ -675,7 +757,8 @@ void *CntThread(void *information)
             // 读取cl和rl的cwnd, cur_rl_cwnd
             num = strtok_r(shared_memory_rl, " ", &save_ptr);
             alpha = strtok_r(NULL, " ", &save_ptr);
-            if (num != NULL && alpha != NULL){
+            if (num != NULL && alpha != NULL)
+            {
                 pre_id_tmp = atoi(num);
                 cur_rl_cwnd = atoi(alpha);
                 cur_rl_cwnd = atoi(alpha) * orca_info.cwnd / 100;
@@ -703,24 +786,33 @@ void *CntThread(void *information)
 
             /*************************************计算最优速率********************************/
             int sum_right = 0;
-            if(is_right_cl) sum_right++;
-            if(is_right_rl) sum_right++;
-            if(is_right_prev) sum_right++;
+            if (is_right_cl)
+                sum_right++;
+            if (is_right_rl)
+                sum_right++;
+            if (is_right_prev)
+                sum_right++;
             change_to_abc();
             cal_optimal_cwnd(4 - sum_right);
             confidence_value_module(ucl, u_optimal, &eta_cl);
             confidence_value_module(url, u_optimal, &eta_rl);
 
             /**************************Probing Stage || Acceleration Stage************************/
-            if(eta_cl >= ETA_OFF && eta_rl >= ETA_OFF){ // Probing Stage
+            if (eta_cl >= ETA_OFF && eta_rl >= ETA_OFF)
+            { // Probing Stage
                 set_cwnd(optimal_cwnd);
                 cur_prev_cwnd = optimal_cwnd;
                 usleep(40 * 1000); // 2RTT
-            }else{ // Acceleration Stage 测试的时候可以暂时先不加
+            }
+            else
+            { // Acceleration Stage 测试的时候可以暂时先不加
                 double eta_x;
-                if(eta_cl < ETA_OFF) eta_x = eta_cl;
-                else eta_x = eta_rl;
-                while(eta_x < ETA_ON){
+                if (eta_cl < ETA_OFF)
+                    eta_x = eta_cl;
+                else
+                    eta_x = eta_rl;
+                while (eta_x < ETA_ON)
+                {
                     eta_x += DELTA_ETA;
                     set_cwnd(optimal_cwnd);
                     cur_prev_cwnd = optimal_cwnd;
