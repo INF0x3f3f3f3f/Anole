@@ -8,7 +8,7 @@
 #include <fstream>
 #include <string>
 #include <cstdio>
-
+#include <errno.h>
 // #define CHANGE_TARGET 1
 #define MAX_CWND 10000
 #define MIN_CWND 4
@@ -45,13 +45,23 @@ bool is_right_prev;
 bool is_right_cl;
 bool is_right_rl;
 int cur_rtt;
-struct tcp_info info_cur;
+// int sock_fd;
+struct tcp_info info_cur, info, info_pre;
 socklen_t info_length;
 double ucl, url, uprev;
 int a_cwnd, b_cwnd, c_cwnd, optimal_cwnd;
 double ua, ub, uc, u_optimal;
 /******************************************实现*********************************************/
 /******************************************效用函数模块**************************************/
+void init_queue()
+{
+    // 最开始插10个rtt，因为当前不知道哪里放maintain_queue
+    for (int i = 0; i < 10; i++)
+    {
+        rtt_queue.push(20);
+    }
+    return;
+}
 void maintain_queue(double newElement)
 { // 保持队列中恒定10个rtt
     if (rtt_queue.size() >= 10)
@@ -78,17 +88,37 @@ double delta_rtt()
     }
     return result / rtt_min / 5;
 }
-double utility_value_module(int func_cwnd, bool *flag)
+int get_cur_cwnd(int i)
 {
-    // 创建套接字
-    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock_fd < 0)
-    {
-        perror("socket");
-        exit(EXIT_FAILURE);
-    }
+    // // 创建套接字
+    // int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    // if (sock_fd < 0)
+    // {
+    //     perror("socket");
+    //     exit(EXIT_FAILURE);
+    // }
     info_length = sizeof(info_cur);
-    getsockopt(sock_fd, IPPROTO_TCP, TCP_INFO, &info_cur, &info_length);
+    if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info_cur, &info_length) == 0)
+    {
+        perror("getsockopt");
+    }
+
+    return info_cur.tcpi_snd_cwnd;
+}
+double utility_value_module(int func_cwnd, bool *flag, int i)
+{
+    // // 创建套接字
+    // int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    // if (sock_fd < 0)
+    // {
+    //     perror("socket");
+    //     exit(EXIT_FAILURE);
+    // }
+    info_length = sizeof(info_cur);
+    if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info_cur, &info_length))
+    {
+        perror("getsockopt");
+    }
     cur_rtt = info_cur.tcpi_rtt;
     double rate = func_cwnd / cur_rtt;
     // 第一部分 - 第二部分
@@ -106,20 +136,20 @@ double utility_value_module(int func_cwnd, bool *flag)
 }
 
 /****************************************最优cwnd模块************************************/
-void set_cwnd(int cwnd_to_set)
+void set_cwnd(int cwnd_to_set, int i)
 {
-    // 创建套接字
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0)
-    {
-        perror("socket");
-        exit(EXIT_FAILURE);
-    }
-    if (setsockopt(sockfd, IPPROTO_TCP, TCP_CWND_USER, &cwnd_to_set, sizeof(cwnd_to_set)) < 0)
+    // // 创建套接字
+    // int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    // if (sockfd < 0)
+    // {
+    //     perror("socket");
+    //     exit(EXIT_FAILURE);
+    // }
+    if (setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_CWND_USER, &cwnd_to_set, sizeof(cwnd_to_set)) < 0)
     {
         printf("ERROR: set TCP_CWND_USER option %s\n", strerror(errno));
     }
-    if (setsockopt(sockfd, IPPROTO_TCP, TCP_CWND, &cwnd_to_set, sizeof(cwnd_to_set)) < 0)
+    if (setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_CWND, &cwnd_to_set, sizeof(cwnd_to_set)) < 0)
     {
         printf("ERROR: set TCP_CWND_USER option %s\n", strerror(errno));
     }
@@ -204,14 +234,18 @@ void confidence_value_module(double u, double umax, double *eta)
     *eta = min(1.0, *eta * y);
     return;
 }
-/******************************************************************************************/
+/******************************************************************************************
+ * main函数
+ */
+
 int main(int argc, char **argv)
 {
     // char debug_file_name[200];
     // sprintf(debug_file_name, "/home/hfx/pantheon-modified-to3/third_party/orca/debug-log/server-%ld.txt", raw_timestamp());
     // FILE *debug_file = fopen(debug_file_name, "a");
+    init_queue();
     DBGPRINT(DBGSERVER, 4, "Main\n");
-    if (argc != 9)
+    if (argc != 8)
     {
         DBGERROR("argc:%d\n", argc);
         for (int i = 0; i < argc; i++)
@@ -226,42 +260,36 @@ int main(int argc, char **argv)
     signal(SIGABRT, handler); // install our handler
     signal(SIGFPE, handler);  // install our handler
     signal(SIGKILL, handler); // install our handler
-    int flow_num;
+
+    // client作为发送端等待
+    int flow_num; // 流数量
     flow_num = FLOW_NUM;
-    client_port = atoi(argv[1]);
-    path = argv[2];
-    target = 50;
+    client_port = atoi(argv[1]); // client端口
+    path = argv[2];              // rl-module的path
+    target = 50;                 // 目标RTT
     target_ratio = 1;
     report_period = atoi(argv[3]);
-    first_time = atoi(argv[4]);
-    scheme = argv[5];
-    actor_id = atoi(argv[6]);
+    // first_time = atoi(argv[4]);
+    scheme = argv[4]; // 内核算法
+    actor_id = atoi(argv[5]);
     // downlink = argv[7];
     // uplink = argv[8];
     // delay_ms = atoi(argv[7]);
     // log_file = argv[8];
-    duration = atoi(argv[7]);
+    duration = atoi(argv[6]);
     // qsize = atoi(argv[10]);
-    duration_steps = atoi(argv[8]);
+    duration_steps = atoi(argv[7]);
     // fprintf(debug_file, "Initialized successfully!\n");
     // fclose(debug_file);
+
     //********************************************************************
-    std::ofstream file("1.txt");   // 创建并打开文件
-    file << "main中" << std::endl; // 写入信息
-    file.close();
-    //********************************************************************
-    //********************************************************************
-    // 以追加模式打开文件
     std::ofstream file1("1.txt", std::ios::app);
     file1 << "start_server开始" << std::endl; // 写入信息
 
-    //********************************************************************
     start_server(flow_num, client_port);
     DBGMARK(DBGSERVER, 5, "DONE!\n");
     //********************************************************************
-    // 以追加模式打开文件
     file1 << "start_server结束" << std::endl; // 写入信息
-
     file1.close();
     //********************************************************************
     shmdt(shared_memory);
@@ -283,28 +311,14 @@ void start_server(int flow_num, int client_port)
     sInfo *info;
     info = new sInfo;
     flows = new cFlow[flow_num];
-    //********************************************************************
-    // 以追加模式打开文件
-    std::ofstream file("1.txt", std::ios::app);
-    file << "here" << std::endl; // 写入信息
-    //********************************************************************
-    file << "here*here" << std::endl; // 写入信息
-    //********************************************************************
+
+    // 检查flow是否为空
     if (flows == NULL)
     {
-        //********************************************************************
-        // 以追加模式打开文件
-        std::ofstream file("1.txt", std::ios::app);
-        file << "error1" << std::endl; // 写入信息
-
-        file.close();
-        //********************************************************************
         DBGMARK(0, 0, "flow generation failed\n");
         return;
     }
-    //********************************************************************
-    file << "here2" << std::endl; // 写入信息
-    //********************************************************************
+
     // threads
     pthread_t data_thread;
     pthread_t cnt_thread;
@@ -316,6 +330,7 @@ void start_server(int flow_num, int client_port)
     struct sockaddr_in client_addr[FLOW_NUM];
     // Controller address
     // struct sockaddr_in ctr_addr;
+
     for (int i = 0; i < FLOW_NUM; i++)
     {
         memset(&server_addr[i], 0, sizeof(server_addr[i]));
@@ -329,67 +344,36 @@ void start_server(int flow_num, int client_port)
         // Init socket
         if ((sock[i] = socket(PF_INET, SOCK_STREAM, 0)) < 0)
         {
-            //********************************************************************
-            // 以追加模式打开文件
-            std::ofstream file("1.txt", std::ios::app);
-            file << "error3" << std::endl; // 写入信息
-
-            file.close();
-            //********************************************************************
             DBGMARK(0, 0, "sockopt: %s\n", strerror(errno));
             return;
         }
 
         int reuse = 1;
         if (setsockopt(sock[i], SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse)) < 0)
+        {
             perror("setsockopt(SO_REUSEADDR) failed");
+        }
+
         // Bind socket on IP:Port
         if (bind(sock[i], (struct sockaddr *)&server_addr[i], sizeof(struct sockaddr)) < 0)
         {
-            //********************************************************************
-            // 以追加模式打开文件
-            std::ofstream file("1.txt", std::ios::app);
-            file << "error4" << std::endl; // 写入信息
-
-            file.close();
-            //********************************************************************
             DBGMARK(0, 0, "bind error srv_ctr_ip: 000000: %s\n", strerror(errno));
             close(sock[i]);
             return;
         }
+
         if (scheme)
         {
             if (setsockopt(sock[i], IPPROTO_TCP, TCP_CONGESTION, scheme, strlen(scheme)) < 0)
             {
-                //********************************************************************
-                // 以追加模式打开文件
-                std::ofstream file("1.txt", std::ios::app);
-                file << "error2" << std::endl; // 写入信息
-
-                file.close();
-                //********************************************************************
                 DBGMARK(0, 0, "TCP congestion doesn't exist: %s\n", strerror(errno));
                 return;
             }
         }
-        //********************************************************************
-        file << "here4" << std::endl; // 写入信息
-        //********************************************************************
     }
 
-    // char container_cmd[500];
-    // sprintf(container_cmd, "sudo -u `whoami` %s/client $MAHIMAHI_BASE 1 %d", path, client_port);
     char cmd[1000];
-    // char final_cmd[1000];
 
-    // if (first_time == 4 || first_time == 2)
-    //     sprintf(cmd, "sudo -u `whoami`   mm-delay %d mm-link %s/../traces/%s %s/../traces/%s --downlink-log=%s/log/down-%s --uplink-queue=droptail --uplink-queue-args=\"packets=%d\" --downlink-queue=droptail --downlink-queue-args=\"packets=%d\" -- sh -c \'%s\' &", delay_ms, path, uplink, path, downlink, path, log_file, qsize, qsize, container_cmd);
-    // else
-    //     sprintf(cmd, "sudo -u `whoami`  mm-delay %d mm-link %s/../traces/%s %s/../traces/%s --uplink-queue=droptail --uplink-queue-args=\"packets=%d\" --downlink-queue=droptail --downlink-queue-args=\"packets=%d\" -- sh -c \'%s\' &", delay_ms, path, uplink, path, downlink, qsize, qsize, container_cmd);
-
-    // sprintf(final_cmd, "%s", cmd);
-
-    // DBGPRINT(DBGSERVER, 0, "%s\n", final_cmd);
     info->trace = trace;
     info->num_lines = num_lines;
     /**
@@ -403,47 +387,34 @@ void start_server(int flow_num, int client_port)
         printf("Error getting shared memory id");
         return;
     }
+
     // Attached shared memory
     if ((shared_memory = (char *)shmat(shmid, NULL, 0)) == (char *)-1)
     {
         printf("Error attaching shared memory id");
         return;
     }
+
     // Setup shared memory, 11 is the size
     if ((shmid_rl = shmget(key_rl, shmem_size, IPC_CREAT | 0666)) < 0)
     {
         printf("Error getting shared memory id");
         return;
     }
+
     // Attached shared memory
     if ((shared_memory_rl = (char *)shmat(shmid_rl, NULL, 0)) == (char *)-1)
     {
         printf("Error attaching shared memory id");
         return;
     }
-    if (first_time == 1)
-    {
-        sprintf(cmd, "/home/`whoami`/venv/bin/python %s/d5.py --tb_interval=1 --base_path=%s --task=%d --job_name=actor --train_dir=%s --mem_r=%d --mem_w=%d &", path, path, actor_id, path, (int)key, (int)key_rl);
-        DBGPRINT(0, 0, "Starting RL Module (Without load) ...\n%s", cmd);
-    }
-    else if (first_time == 2 || first_time == 4)
-    {
-        sprintf(cmd, "/home/`whoami`/venv/bin/python %s/d5.py --tb_interval=1 --base_path=%s --load --eval --task=%d --job_name=actor --train_dir=%s  --mem_r=%d --mem_w=%d &", path, path, actor_id, path, (int)key, (int)key_rl);
-        DBGPRINT(0, 0, "Starting RL Module (No learning) ...\n%s", cmd);
-    }
-    else
-    {
-        sprintf(cmd, "/home/`whoami`/venv/bin/python %s/d5.py --load --tb_interval=1 --base_path=%s --task=%d --job_name=actor --train_dir=%s  --mem_r=%d --mem_w=%d &", path, path, actor_id, path, (int)key, (int)key_rl);
-        DBGPRINT(0, 0, "Starting RL Module (With load) ...\n%s", cmd);
-    }
-    //********************************************************************
-    file << "here5" << std::endl; // 写入信息
-    //********************************************************************
+
+    sprintf(cmd, "/usr/bin/python %s/d5.py --load --tb_interval=1 --base_path=%s --task=%d --job_name=actor --mem_r=%d --mem_w=%d&", path, path, actor_id, (int)key, (int)key_rl);
+    DBGPRINT(0, 0, "Starting RL Module (With load) ...\n%s", cmd);
+
     initial_timestamp();
     system(cmd);
-    //********************************************************************
-    file << "here6" << std::endl; // 写入信息
-    //********************************************************************
+
     // Wait to get OK signal (alpha=OK_SIGNAL)
     bool got_ready_signal_from_rl = false;
     int signal;
@@ -453,9 +424,6 @@ void start_server(int flow_num, int client_port)
     int signal_check_counter = 0;
     while (!got_ready_signal_from_rl)
     {
-        //********************************************************************
-        file << "in—while" << std::endl; // 写入信息
-        //********************************************************************
         // Get alpha from RL-Module
         signal_check_counter++;
         num = strtok_r(shared_memory_rl, " ", &save_ptr);
@@ -478,21 +446,12 @@ void start_server(int flow_num, int client_port)
         }
         if (signal_check_counter > 18000)
         {
-            //********************************************************************
-            file << "here9999" << std::endl; // 写入信息
-            //********************************************************************
             DBGERROR("After 3 minutes, no response (OK_Signal) from the Actor %d is received! We are going down down down ...\n", actor_id);
             return;
         }
     }
-    //********************************************************************
-    file << "here7" << std::endl; // 写入信息
-    //********************************************************************
     DBGPRINT(0, 0, "RL Module is Ready. Let's Start ...\n\n");
     usleep(actor_id * 10000 + 10000);
-    // DBGPRINT(0, 0, "%s", final_cmd);
-    // Now its time to start the server-client app and tune C2TCP socket.
-    // system(final_cmd);
 
     // Start listen
     int maxfdp = -1;
@@ -511,9 +470,10 @@ void start_server(int flow_num, int client_port)
     // Timeout {1Hour} if something goes wrong! (Maybe  mahimahi error...!)
     maxfdp = maxfdp + 1;
     struct timeval timeout;
-    timeout.tv_sec = 60 * 60;
+    timeout.tv_sec = 600;
     timeout.tv_usec = 0;
     int rc = select(maxfdp, &rset, NULL, NULL, &timeout);
+    printf("%d,%s", errno, strerror(errno));
     /**********************************************************/
     /* Check to see if the select call failed.                */
     /**********************************************************/
@@ -530,15 +490,14 @@ void start_server(int flow_num, int client_port)
         DBGERROR("=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-==-=-=-=-=-=-=- select() Timeout! =-=-=-=-=-=--=-=-=-=-=\n");
         return;
     }
-    //********************************************************************
-    file << "here8" << std::endl; // 写入信息
-    //********************************************************************
+
     int sin_size = sizeof(struct sockaddr_in);
     while (flow_index < flow_num)
     {
         if (FD_ISSET(sock[flow_index], &rset))
         {
             int value = accept(sock[flow_index], (struct sockaddr *)&client_addr[flow_index], (socklen_t *)&sin_size);
+            DBGMARK(5, 1, "Accept request from client!");
             if (value < 0)
             {
                 perror("accept error\n");
@@ -550,13 +509,14 @@ void start_server(int flow_num, int client_port)
             sock_for_cnt[flow_index] = value;
             flows[flow_index].flowinfo.sock = value;
             flows[flow_index].dst_addr = client_addr[flow_index];
+            // 创建data thread 发送数据
             if (pthread_create(&data_thread, NULL, DataThread, (void *)&flows[flow_index]) < 0)
             {
-                perror("could not create thread\n");
                 close(sock[flow_index]);
                 return;
             }
 
+            // 创建控制线程和定时器线程
             if (flow_index == 0)
             {
                 if (pthread_create(&cnt_thread, NULL, CntThread, (void *)info) < 0)
@@ -642,12 +602,12 @@ void *CntThread(void *information)
         }
         // Enable orca on this socket:
         // TCP_ORCA_ENABLE
-        int enable_orca = 2;
-        if (setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_ORCA_ENABLE, &enable_orca, sizeof(enable_orca)) < 0)
-        {
-            DBGERROR("CHECK KERNEL VERSION (0514+) ;CANNOT ENABLE ORCA %s\n", strerror(errno));
-            return ((void *)0);
-        }
+        // int enable_orca = 2;
+        // if (setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_ORCA_ENABLE, &enable_orca, sizeof(enable_orca)) < 0)
+        // {
+        //     DBGERROR("CHECK KERNEL VERSION (0514+) ;CANNOT ENABLE ORCA %s\n", strerror(errno));
+        //     return ((void *)0);
+        // }
     }
     char message[1000];
     char *num;
@@ -657,64 +617,115 @@ void *CntThread(void *information)
     uint64_t t0, t1;
     t0 = timestamp();
     // Time to start the Logic
-    struct tcp_orca_info tcp_info_pre;
-    tcp_info_pre.init();
+    // struct tcp_orca_info tcp_info_pre;
+    // tcp_info_pre.init();
+    // int sock_fd1 = socket(AF_INET, SOCK_STREAM, 0);
+    // if (sock_fd1 < 0)
+    // {
+    //     perror("socket");
+    //     exit(EXIT_FAILURE);
+    // }
+    info_length = sizeof(info_pre);
+    for (int i = 0; i < FLOW_NUM; i++)
+    {
+        if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info_pre, &info_length))
+        {
+            perror("getsockopt");
+        }
+        DBGMARK(5, 1, "the congestion window at start = %u \n", info_pre.tcpi_snd_cwnd);
+    }
     int get_info_error_counter = 0;
     int actor_is_dead_counter = 0;
     int tmp_step = 0;
     while (send_traffic)
     {
-        for (int i = 0; i < flow_index; i++)
+        // for (int i = 0; i < flow_index; i++)
+        for (int i = 0; i < FLOW_NUM; i++)
         {
             got_no_zero = 0;
             usleep(report_period * 1000); // 20 * 1000 = 20000 us = 20 ms
             while (!got_no_zero && send_traffic)
             {
-                ret1 = get_orca_info(sock_for_cnt[i], &orca_info);
-                if (ret1 < 0)
+                // ret1 = get_orca_info(sock_for_cnt[i], &orca_info);
+                // if (ret1 < 0)
+                // {
+                //     DBGMARK(0, 0, "setsockopt: for index:%d flow_index:%d TCP_C2TCP ... %s (ret1:%d)\n", i, flow_index, strerror(errno), ret1);
+                //     return ((void *)0);
+                // }
+                // int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+                // if (sock_fd < 0)
+                // {
+                //     perror("socket");
+                //     exit(EXIT_FAILURE);
+                // }
+                info_length = sizeof(info);
+                if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info, &info_length))
                 {
-                    DBGMARK(0, 0, "setsockopt: for index:%d flow_index:%d TCP_C2TCP ... %s (ret1:%d)\n", i, flow_index, strerror(errno), ret1);
-                    return ((void *)0);
+                    perror("getsockopt");
                 }
-                if (orca_info.avg_urtt > 0)
+                // if (orca_info.avg_urtt > 0)
+                // DBGMARK(0, 0, "info.tcpi_rtt = %lf \n", (double)info.tcpi_rtt);
+                DBGMARK(0, 0, "info.tcpi_snd_cwnd = %lf \n", (double)info.tcpi_snd_cwnd);
+                DBGMARK(0, 0, "info.tcpi_rtt = %u \n", info.tcpi_rtt);
+                if (info.tcpi_rtt >= 0)
                 {
+                    DBGMARK(5, 1, "TCPI_RTT>0 extract the info and set cwnd \n");
                     t1 = timestamp();
 
                     double time_delta = (double)(t1 - t0) / 1000000.0;
-                    double delay = (double)orca_info.avg_urtt / 1000.0;
-                    min_rtt_ = (double)(orca_info.min_rtt / 1000.0);
-                    lost_bytes = (double)(orca_info.lost_bytes);
-                    pacing_rate = (double)(orca_info.pacing_rate);
-                    lost_rate = lost_bytes / time_delta; // Rate in MBps
-                    srtt_ms = (double)((orca_info.srtt_us >> 3) / 1000.0);
-                    snd_ssthresh = (double)(orca_info.snd_ssthresh);
-                    packets_out = (double)(orca_info.packets_out);
-                    retrans_out = (double)(orca_info.retrans_out);
-                    max_packets_out = (double)(orca_info.max_packets_out);
+                    // double delay = (double)orca_info.avg_urtt / 1000.0;
+                    double delay = (double)info.tcpi_rtt / 1000.0;
+                    // min_rtt_ = (double)(orca_info.min_rtt / 1000.0);
+                    // ？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？
+                    min_rtt_ = (double)(20000);
+                    // lost_bytes = (double)(orca_info.lost_bytes);
+                    lost_bytes = (double)(info.tcpi_lost);
+                    // pacing_rate = (double)(orca_info.pacing_rate);
+                    pacing_rate = (double)info.tcpi_snd_cwnd / 20.0;
+                    // lost_rate = lost_bytes / time_delta; // Rate in MBps
+                    if (info.tcpi_snd_cwnd)
+                    {
+                        lost_rate = info.tcpi_lost / info.tcpi_snd_cwnd;
+                    }
+                    // srtt_ms = (double)((orca_info.srtt_us >> 3) / 1000.0);
+                    srtt_ms = (double)((info.tcpi_rtt >> 3) / 1000.0);
+                    // snd_ssthresh = (double)(orca_info.snd_ssthresh);
+                    snd_ssthresh = (double)(info.tcpi_snd_ssthresh);
+                    // packets_out = (double)(orca_info.packets_out);
+                    packets_out = (double)(info.tcpi_unacked);
+                    // retrans_out = (double)(orca_info.retrans_out);
+                    retrans_out = (double)(info.tcpi_retrans);
+                    // max_packets_out = (double)(orca_info.max_packets_out);
+                    max_packets_out = (double)(info.tcpi_last_data_sent);
 
                     report_period = 20;
                     if (!slow_start_passed)
                         // Just for the first Time
-                        slow_start_passed = (orca_info.snd_ssthresh < orca_info.cwnd) ? 1 : 0;
-
+                        // slow_start_passed = (orca_info.snd_ssthresh < orca_info.cwnd) ? 1 : 0;
+                        slow_start_passed = (info.tcpi_snd_ssthresh < info.tcpi_snd_cwnd) ? 1 : 0;
                     if (!slow_start_passed)
                     {
                         // got_no_zero=1;
-                        tcp_info_pre = orca_info;
+                        // tcp_info_pre = orca_info;
+                        info_pre = info;
                         t0 = timestamp();
 
-                        target_ratio = 1.1 * orca_info.cwnd;
-                        ret1 = setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_CWND, &target_ratio, sizeof(target_ratio));
-                        if (ret1 < 0)
-                        {
-                            DBGPRINT(0, 0, "setsockopt: for index:%d flow_index:%d ... %s (ret1:%d)\n", i, flow_index, strerror(errno), ret1);
-                            return ((void *)0);
-                        }
+                        // target_ratio = 1.1 * orca_info.cwnd;
+                        target_ratio = 1.1 * info.tcpi_snd_cwnd;
+
+                        // target_ratio = 50;
+                        // ret1 = setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_CWND, &target_ratio, sizeof(target_ratio));
+                        // if (ret1 < 0)
+                        // {
+                        //     DBGPRINT(0, 0, "setsockopt: for index:%d flow_index:%d ... %s (ret1:%d)\n", i, flow_index, strerror(errno), ret1);
+                        //     return ((void *)0);
+                        // }
+                        set_cwnd(target_ratio, i);
                         continue;
                     }
                     sprintf(message, "%d %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f",
-                            msg_id, delay, (double)orca_info.thr, (double)orca_info.cnt, (double)time_delta,
-                            (double)target, (double)orca_info.cwnd, pacing_rate, lost_rate, srtt_ms, snd_ssthresh, packets_out, retrans_out, max_packets_out, (double)orca_info.mss, min_rtt_);
+                            msg_id, delay, (double)((double)info.tcpi_snd_cwnd / time_delta), (double)10.0, (double)time_delta,
+                            (double)target, (double)info.tcpi_snd_cwnd, pacing_rate, lost_rate, srtt_ms, snd_ssthresh, packets_out, retrans_out, max_packets_out, (double)info.tcpi_snd_mss, min_rtt_);
                     memcpy(shared_memory, message, sizeof(message));
                     if ((duration_steps != 0))
                     {
@@ -726,7 +737,8 @@ void *CntThread(void *information)
                     msg_id = (msg_id + 1) % 1000;
                     DBGPRINT(DBGSERVER, 1, "%s\n", message);
                     got_no_zero = 1;
-                    tcp_info_pre = orca_info;
+                    // tcp_info_pre = orca_info;
+                    info = info_pre;
                     t0 = timestamp();
                     get_info_error_counter = 0;
                 }
@@ -743,16 +755,12 @@ void *CntThread(void *information)
             }
             /******************************************逻辑***************************************/
             /*************************************Evaluaiton stage********************************/
-            // 读取cl和rl的cwnd, cur_cl_cwnd
-            // 创建套接字
-            int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-            if (sock_fd < 0)
-            {
-                perror("socket");
-                exit(EXIT_FAILURE);
-            }
+
             info_length = sizeof(info_cur);
-            getsockopt(sock_fd, IPPROTO_TCP, TCP_INFO, &info_cur, &info_length);
+            if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info_cur, &info_length) == 0)
+            {
+                perror("getsockopt");
+            }
             cur_cl_cwnd = info_cur.tcpi_snd_cwnd;
             // 读取cl和rl的cwnd, cur_rl_cwnd
             num = strtok_r(shared_memory_rl, " ", &save_ptr);
@@ -761,28 +769,28 @@ void *CntThread(void *information)
             {
                 pre_id_tmp = atoi(num);
                 cur_rl_cwnd = atoi(alpha);
-                cur_rl_cwnd = atoi(alpha) * orca_info.cwnd / 100;
+                cur_rl_cwnd = atoi(alpha) * get_cur_cwnd(i) / 100;
             }
 
             // 这里应该小流先开始，先简略，先cl后rl
             // 先cl
-            set_cwnd(cur_cl_cwnd);
+            set_cwnd(cur_cl_cwnd, i);
             usleep(10 * 1000); // 0.5RTT
 
             // 后rl
-            set_cwnd(cur_rl_cwnd);
+            set_cwnd(cur_rl_cwnd, i);
             usleep(10 * 1000); // 0.5RTT
             // Uprev
-            uprev = utility_value_module(cur_prev_cwnd, &is_right_prev);
+            uprev = utility_value_module(cur_prev_cwnd, &is_right_prev, i);
 
             // prev 1个RTT
-            set_cwnd(cur_prev_cwnd);
+            set_cwnd(cur_prev_cwnd, i);
             usleep(10 * 1000); // 0.5RTT
             // Ucl
-            ucl = utility_value_module(cur_cl_cwnd, &is_right_cl);
+            ucl = utility_value_module(cur_cl_cwnd, &is_right_cl, i);
             usleep(10 * 1000); // 0.5RTT
             // Url
-            url = utility_value_module(cur_rl_cwnd, &is_right_rl);
+            url = utility_value_module(cur_rl_cwnd, &is_right_rl, i);
 
             /*************************************计算最优速率********************************/
             int sum_right = 0;
@@ -800,7 +808,7 @@ void *CntThread(void *information)
             /**************************Probing Stage || Acceleration Stage************************/
             if (eta_cl >= ETA_OFF && eta_rl >= ETA_OFF)
             { // Probing Stage
-                set_cwnd(optimal_cwnd);
+                set_cwnd(optimal_cwnd, i);
                 cur_prev_cwnd = optimal_cwnd;
                 usleep(40 * 1000); // 2RTT
             }
@@ -814,85 +822,11 @@ void *CntThread(void *information)
                 while (eta_x < ETA_ON)
                 {
                     eta_x += DELTA_ETA;
-                    set_cwnd(optimal_cwnd);
+                    set_cwnd(optimal_cwnd, i);
                     cur_prev_cwnd = optimal_cwnd;
                     // confidence_value_module()
                 }
             }
-            /*************************************************************************************/
-            // got_alpha = false;
-            // int error_cnt = 0;
-            // int error2_cnt = 0;
-            // while (!got_alpha && send_traffic)
-            // {
-            //     // Get alpha from RL-Module
-            //     num = strtok_r(shared_memory_rl, " ", &save_ptr);
-            //     alpha = strtok_r(NULL, " ", &save_ptr);
-            //     if (num != NULL && alpha != NULL)
-            //     {
-            //         pre_id_tmp = atoi(num);
-            //         target_ratio = atoi(alpha);
-            //         if (pre_id != pre_id_tmp /*&& target_ratio!=OK_SIGNAL*/)
-            //         {
-            //             got_alpha = true;
-            //             pre_id = pre_id_tmp;
-            //             target_ratio = atoi(alpha) * orca_info.cwnd / 100;
-
-            //             if (target_ratio < MIN_CWND)
-            //                 target_ratio = MIN_CWND;
-            //             ret1 = setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_CWND, &target_ratio, sizeof(target_ratio));
-
-            //             if (ret1 < 0)
-            //             {
-            //                 DBGPRINT(0, 0, "setsockopt: for index:%d flow_index:%d ... %s (ret1:%d)\n", i, flow_index, strerror(errno), ret1);
-            //                 return ((void *)0);
-            //             }
-            //             error_cnt = 0;
-            //         }
-            //         else
-            //         {
-            //             if (error_cnt > 1000)
-            //             {
-            //                 DBGPRINT(DBGSERVER, 0, "still no new value id:%d prev_id:%d\n", pre_id_tmp, pre_id);
-            //                 error_cnt = 0;
-            //             }
-            //             error_cnt++;
-            //             usleep(1000);
-            //         }
-            //         error2_cnt = 0;
-            //     }
-            //     else
-            //     {
-            //         if (error2_cnt == 50)
-            //         {
-            //             // DBGPRINT(0, 0, "got null values: (downlink:%s delay:%d qs:%d) Actor: %d iteration:%d\n", downlink, delay_ms, qsize, actor_id, step_it);
-            //             // FIXME:
-            //             // A Hack for now! Let's send a new state to get new action in case we have missed previous action. Why it happens?!
-            //             if ((1 + tmp_step) == (step_it))
-            //             {
-            //                 actor_is_dead_counter++;
-            //                 tmp_step = step_it;
-            //                 if (actor_is_dead_counter > 120)
-            //                 {
-            //                     DBGMARK(0, 0, "No valid action for 1 min. We (server of actor %d) are going down down down ...\n", actor_id);
-            //                     send_traffic = false;
-            //                 }
-            //             }
-            //             else
-            //             {
-            //                 actor_is_dead_counter = 0;
-            //                 tmp_step = step_it;
-            //             }
-            //             got_alpha = true;
-            //             error2_cnt = 0;
-            //         }
-            //         else
-            //         {
-            //             error2_cnt++;
-            //             usleep(10000);
-            //         }
-            //     }
-            // }
         }
     }
     shmdt(shared_memory);
@@ -901,6 +835,8 @@ void *CntThread(void *information)
     shmctl(shmid_rl, IPC_RMID, NULL);
     return ((void *)0);
 }
+
+// DataThread中发送数据
 void *DataThread(void *info)
 {
     /*
@@ -1003,10 +939,13 @@ void *DataThread(void *info)
     while (send_traffic)
     {
         len = strlen(write_message);
+        DBGMARK(DBGSERVER, 5, "len = %d\n", len);
         while (len > 0)
         {
             DBGMARK(DBGSERVER, 5, "++++++\n");
-            len -= send(sock_local, write_message, strlen(write_message), 0);
+            int s = send(sock_local, write_message, strlen(write_message), 0);
+            DBGMARK(DBGSERVER, 5, "Successfully sent = %d\n", s);
+            len -= s;
             usleep(50);
             DBGMARK(DBGSERVER, 5, "------\n");
         }
