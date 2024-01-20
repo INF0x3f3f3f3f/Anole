@@ -9,6 +9,9 @@
 #include <string>
 #include <cstdio>
 #include <errno.h>
+
+#define ENABLE_ANOLE_RL false
+
 // #define CHANGE_TARGET 1
 #define MAX_CWND 10000
 #define MIN_CWND 4
@@ -16,15 +19,17 @@
 #include <queue>
 #include <cmath>
 #include <algorithm>
+#include <random>
+typedef unsigned int __u32;
 /************************************参数 & 全局变量定义************************************/
 /**********效用模块**********/
 #define EXPONENT_T 0.9
-#define ALPHA 1
-#define BETA 900
+#define ALPHA 10
+#define BETA 1
 #define LAMBDA 11.35 // 四者选值都是根据vivace的
-#define MU 0.5
-std::queue<double> rtt_queue;
-double rtt_min; //  注意我这里自己设的是rtt_min
+#define MU 0.1
+// std::queue<double> rtt_queue;
+// double rtt_min = 20; //  注意我这里自己设的是rtt_min
 /**********最优cwnd模块**********/
 #define CWND_THRESHOLD 2
 /**********置信度模块**********/
@@ -35,8 +40,12 @@ double rtt_min; //  注意我这里自己设的是rtt_min
 double eta_cl = 1;
 double eta_rl = 1;
 /*************逻辑************/
+double epsilon = 0.8;
 #define TCP_CWND 38
 #define TCP_CWND_USER 39
+#define TCP_RTT                 40
+#define TCP_RTTS                41
+#define TCP_RTTMIN              42
 int CUR_CWND;
 int cur_prev_cwnd = 100;
 int cur_cl_cwnd = 100;
@@ -45,115 +54,158 @@ bool is_right_prev;
 bool is_right_cl;
 bool is_right_rl;
 int cur_rtt;
+bool set_if_out = false;
 // int sock_fd;
 struct tcp_info info_cur, info, info_pre;
 socklen_t info_length;
 double ucl, url, uprev;
 int a_cwnd, b_cwnd, c_cwnd, optimal_cwnd;
 double ua, ub, uc, u_optimal;
+__u32 ONE_WAY_DELAY = 25;
 /******************************************实现*********************************************/
 /******************************************效用函数模块**************************************/
-void init_queue()
+void print_rtt(int tt)
 {
-    // 最开始插10个rtt，因为当前不知道哪里放maintain_queue
-    for (int i = 0; i < 10; i++)
-    {
-        rtt_queue.push(20);
+    __u32 his_rtt[50];
+	__u32 length = 200;
+    if (getsockopt(sock_for_cnt[tt], IPPROTO_TCP, TCP_RTTS, &his_rtt[0], &length) < 0){
+        printf("ERROR: set TCP_RTTS option %s\n", strerror(errno));
+    }
+    for(int i=0; i < 5; i++) {
+        DBGMARK(5, 1, "\nhistory_rtt = %u %u %u %u %u %u %u %u %u %u\n", 
+        his_rtt[49-i*10], his_rtt[48-i*10], his_rtt[47-i*10], his_rtt[46-i*10], his_rtt[45-i*10],
+        his_rtt[44-i*10], his_rtt[43-i*10], his_rtt[42-i*10], his_rtt[41-i*10], his_rtt[40-i*10]);
     }
     return;
 }
-void maintain_queue(double newElement)
-{ // 保持队列中恒定10个rtt
-    if (rtt_queue.size() >= 10)
-    {
-        rtt_queue.pop();
-    }
-    rtt_queue.push(newElement);
-    return;
-}
-double delta_rtt()
+double delta_rtt(int tt)
 { // 计算 delta_rtt
-    if (rtt_queue.size() < 10)
-        return 0;
-    std::queue<double> temp_queue = rtt_queue;
-    double result = 0;
-    for (int i = 0; i < 10; i++)
-    {
-        double element = temp_queue.front();
-        temp_queue.pop();
-        if (i & 1)
-            result += element;
-        else
-            result -= element;
+    // if (rtt_queue.size() < 10)
+    //     return 0;
+    // std::queue<double> temp_queue = rtt_queue;
+    __u32 his_rtt[20];
+	__u32 length = 80;
+    if (getsockopt(sock_for_cnt[tt], IPPROTO_TCP, TCP_RTTS, &his_rtt[0], &length) < 0){
+        printf("ERROR: set TCP_RTTS option %s\n", strerror(errno));
+        return 1;
     }
-    return result / rtt_min / 5;
+    // DBGMARK(5, 1, "\nhistory_rtt = %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u %u\n",
+    // his_rtt[19], his_rtt[18], his_rtt[17], his_rtt[16], his_rtt[15], 
+    // his_rtt[14], his_rtt[13], his_rtt[12], his_rtt[11], his_rtt[10], 
+    // his_rtt[9], his_rtt[8], his_rtt[7], his_rtt[6], his_rtt[5], 
+    // his_rtt[4], his_rtt[3], his_rtt[2], his_rtt[1], his_rtt[0]);
+    /********************************************************************/
+    double result = 0;
+    for (int i = 0; i < 20; i++)
+    {
+        // if (i & 1)
+        //     result += his_rtt[i];
+        // else
+        //     result -= his_rtt[i];
+        if(i >= 10) result += his_rtt[i];
+        else result -= his_rtt[i];
+    }
+    /********************************************************************/
+    __u32 min_rtt = 0;
+    length = 4;
+    if (getsockopt(sock_for_cnt[tt], IPPROTO_TCP, TCP_RTTMIN, &min_rtt, &length) < 0){
+        printf("ERROR: set TCP_RTTMIN option %s\n", strerror(errno));
+        return 1;
+    }
+    // return (result - min_rtt) / min_rtt;
+    DBGMARK(5, 1, "\nresult = %.8lf \n", result);
+    double res = result / min_rtt / 10;
+    DBGMARK(5, 1, "\ndrtt = %.8lf \n", res);
+    double sum = 0;
+    for(int i=10; i < 20; i++) sum += his_rtt[i];
+    sum /= 10;
+    res += pow(400, 1.0 * (sum - min_rtt) / min_rtt) - 1;
+    DBGMARK(5, 1, "\ndrtt = %.8lf \n", res);
+    return res;
 }
 int get_cur_cwnd(int i)
 {
-    // // 创建套接字
-    // int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-    // if (sock_fd < 0)
-    // {
-    //     perror("socket");
-    //     exit(EXIT_FAILURE);
-    // }
     info_length = sizeof(info_cur);
-    if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info_cur, &info_length) == 0)
+    if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info_cur, &info_length))
     {
+        DBGMARK(5, 1, "getsockopt1\n");
         perror("getsockopt");
     }
 
     return info_cur.tcpi_snd_cwnd;
 }
+__u32 read_cur_rtt(int tt){
+    __u32 res = 0;
+    __u32 length = 4;
+    if (getsockopt(sock_for_cnt[tt], IPPROTO_TCP, TCP_RTT, &res, &length) < 0){
+        printf("ERROR: set TCP_RTT option %s\n", strerror(errno));
+        return 1;
+    }
+    return res;
+}
+__u32 read_min_rtt(int tt){
+    __u32 res = 0;
+    __u32 length = 4;
+    if (getsockopt(sock_for_cnt[tt], IPPROTO_TCP, TCP_RTTMIN, &res, &length) < 0){
+        printf("ERROR: set TCP_RTTMIN option %s\n", strerror(errno));
+        return 1;
+    }
+    return res;
+}
 double utility_value_module(int func_cwnd, bool *flag, int i)
 {
-    // // 创建套接字
-    // int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-    // if (sock_fd < 0)
+    // info_length = sizeof(info_cur);
+    // if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info_cur, &info_length))
     // {
-    //     perror("socket");
-    //     exit(EXIT_FAILURE);
+    //     perror("getsockopt");
     // }
-    info_length = sizeof(info_cur);
-    if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info_cur, &info_length))
-    {
-        perror("getsockopt");
-    }
-    cur_rtt = info_cur.tcpi_rtt;
-    double rate = func_cwnd / cur_rtt;
+    // cur_rtt = info_cur.tcpi_rtt;
+    cur_rtt = read_cur_rtt(i);
+    double rate = 1500.0 * 8 * func_cwnd / cur_rtt;
+    DBGMARK(5, 1, "\nin_funcion rate = %.2lf \n", rate);
     // 第一部分 - 第二部分
-    double drtt = delta_rtt();
-    if (drtt > 0)
+    double drtt = delta_rtt(i);
+    if (drtt > 0.6)
         *flag = true;
     else
         *flag = false;
+    // DBGMARK(5, 1, "\ndrtt = %.8lf \n", drtt);
     double u_value = ALPHA * pow(rate, EXPONENT_T) - BETA * rate * max(0.0, drtt);
+    
+    // 先读取min_rtt
+    __u32 min_rtt = 0, length = 4;
+    if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_RTTMIN, &min_rtt, &length) < 0){
+        printf("ERROR: set TCP_RTTMIN option %s\n", strerror(errno));
+        return 1;
+    }
     // 第三部分
-    double cur_rtt = info_cur.tcpi_rtt;
-    if (cur_rtt / rtt_min > 1 + MU)
-        u_value -= LAMBDA * rate * cur_rtt / rtt_min;
+    // double cur_rtt = info_cur.tcpi_rtt;
+    __u32 minrtt = read_min_rtt(i);
+    __u32 currtt = read_cur_rtt(i);
+    if(double(1.0 * currtt / minrtt) > 1 + MU) u_value -= LAMBDA * rate * currtt / minrtt;
     return u_value;
 }
-
 /****************************************最优cwnd模块************************************/
 void set_cwnd(int cwnd_to_set, int i)
 {
-    // // 创建套接字
-    // int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    // if (sockfd < 0)
-    // {
-    //     perror("socket");
-    //     exit(EXIT_FAILURE);
-    // }
+    uint64_t cwnd = uint64_t(cwnd_to_set);
+
+    if (cwnd > 600 || cwnd <= 2)
+    {
+        return;
+    }
+    DBGMARK(5, 1, "Cwnd is normal, setting cwnd = %d\n", cwnd_to_set);
     if (setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_CWND_USER, &cwnd_to_set, sizeof(cwnd_to_set)) < 0)
     {
-        printf("ERROR: set TCP_CWND_USER option %s\n", strerror(errno));
+        DBGMARK(5, 1, "ERROR: set TCP_CWND_USER option %s\n", strerror(errno));
     }
-    if (setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_CWND, &cwnd_to_set, sizeof(cwnd_to_set)) < 0)
-    {
-        printf("ERROR: set TCP_CWND_USER option %s\n", strerror(errno));
-    }
+    // if (setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_CWND, &cwnd_to_set, sizeof(cwnd_to_set)) < 0)
+    // {
+    //     DBGMARK(5, 1, "ERROR: set TCP_CWND option %s\n", strerror(errno));
+    // }
+    set_if_out = false;
 }
+
 void change_to_abc()
 {
     if (cur_cl_cwnd <= cur_rl_cwnd && cur_rl_cwnd <= cur_prev_cwnd)
@@ -186,6 +238,7 @@ void change_to_abc()
         a_cwnd = cur_prev_cwnd, b_cwnd = cur_rl_cwnd, c_cwnd = cur_cl_cwnd;
         ua = uprev, ub = url, uc = ucl;
     }
+    DBGMARK(5, 1, "\na = %u, b = %u, c = %u \n", a_cwnd, b_cwnd, c_cwnd);
 }
 void equation8()
 {
@@ -220,18 +273,21 @@ void cal_optimal_cwnd(int situation)
             cmp_threshold();
         else // 这里根据历史记录的C推断R暂时没写进去
             optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub);
+        // optimal_cwnd = b_cwnd, u_optimal = ub;
     }
     else if (situation == 4)
     {
-        optimal_cwnd = (a_cwnd + b_cwnd) / 2, u_optimal = max(ua, ub);
+        optimal_cwnd = c_cwnd, u_optimal = uc;
     }
+    DBGMARK(5, 1, "\n当前属于情况 = %u\n", situation);
+    DBGMARK(5, 1, "\n最优的optimal cwnd = %u, 最优的效用值u_optimal = %.2lf\n", optimal_cwnd, u_optimal);
     return;
 }
 /******************************************置信度模块***************************************/
 void confidence_value_module(double u, double umax, double *eta)
 {
     double y = u / umax + THETA;
-    *eta = min(1.0, *eta * y);
+    *eta = min(1.0, max(0.50, *eta * y));
     return;
 }
 /******************************************************************************************
@@ -240,10 +296,7 @@ void confidence_value_module(double u, double umax, double *eta)
 
 int main(int argc, char **argv)
 {
-    // char debug_file_name[200];
-    // sprintf(debug_file_name, "/home/hfx/pantheon-modified-to3/third_party/orca/debug-log/server-%ld.txt", raw_timestamp());
-    // FILE *debug_file = fopen(debug_file_name, "a");
-    init_queue();
+    // init_queue();
     DBGPRINT(DBGSERVER, 4, "Main\n");
     if (argc != 8)
     {
@@ -269,18 +322,10 @@ int main(int argc, char **argv)
     target = 50;                 // 目标RTT
     target_ratio = 1;
     report_period = atoi(argv[3]);
-    // first_time = atoi(argv[4]);
     scheme = argv[4]; // 内核算法
     actor_id = atoi(argv[5]);
-    // downlink = argv[7];
-    // uplink = argv[8];
-    // delay_ms = atoi(argv[7]);
-    // log_file = argv[8];
     duration = atoi(argv[6]);
-    // qsize = atoi(argv[10]);
     duration_steps = atoi(argv[7]);
-    // fprintf(debug_file, "Initialized successfully!\n");
-    // fclose(debug_file);
 
     //********************************************************************
     std::ofstream file1("1.txt", std::ios::app);
@@ -561,21 +606,6 @@ void *TimerThread(void *information)
 }
 void *CntThread(void *information)
 {
-    /*    struct sched_param param;
-        param.__sched_priority=sched_get_priority_max(SCHED_RR);
-        int policy=SCHED_RR;
-        int s = pthread_setschedparam(pthread_self(), policy, &param);
-        if (s!=0)
-        {
-            DBGPRINT(0,0,"Cannot set priority (%d) for the Main: %s\n",param.__sched_priority,strerror(errno));
-        }
-
-        s = pthread_getschedparam(pthread_self(),&policy,&param);
-        if (s!=0)
-        {
-            DBGPRINT(0,0,"Cannot get priority for the Data thread: %s\n",strerror(errno));
-        }
-        */
     int ret1;
     double min_rtt_ = 0.0;
     double pacing_rate = 0.0;
@@ -600,14 +630,6 @@ void *CntThread(void *information)
             DBGMARK(0, 0, "ERROR: set TCP_NODELAY option %s\n", strerror(errno));
             return ((void *)0);
         }
-        // Enable orca on this socket:
-        // TCP_ORCA_ENABLE
-        // int enable_orca = 2;
-        // if (setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_ORCA_ENABLE, &enable_orca, sizeof(enable_orca)) < 0)
-        // {
-        //     DBGERROR("CHECK KERNEL VERSION (0514+) ;CANNOT ENABLE ORCA %s\n", strerror(errno));
-        //     return ((void *)0);
-        // }
     }
     char message[1000];
     char *num;
@@ -616,68 +638,51 @@ void *CntThread(void *information)
     int got_no_zero = 0;
     uint64_t t0, t1;
     t0 = timestamp();
-    // Time to start the Logic
-    // struct tcp_orca_info tcp_info_pre;
-    // tcp_info_pre.init();
-    // int sock_fd1 = socket(AF_INET, SOCK_STREAM, 0);
-    // if (sock_fd1 < 0)
-    // {
-    //     perror("socket");
-    //     exit(EXIT_FAILURE);
-    // }
     info_length = sizeof(info_pre);
     for (int i = 0; i < FLOW_NUM; i++)
     {
-        if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info_pre, &info_length))
+        info_length = sizeof(info_pre);
+        if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info_pre, &info_length) < 0)
         {
-            perror("getsockopt");
+            DBGMARK(0, 0, "ERROR: getsockopt\n");
+            return ((void *)0);
         }
-        DBGMARK(5, 1, "the congestion window at start = %u \n", info_pre.tcpi_snd_cwnd);
+        DBGMARK(5, 1, "\n!!!!!!!!!!!!!!!!!!!!!!!!\nthe congestion window at start = %u \n慢启动的阈值为 = %u \n",
+                info_pre.tcpi_snd_cwnd, info_pre.tcpi_snd_ssthresh);
+        // return ((void *)0);
     }
     int get_info_error_counter = 0;
     int actor_is_dead_counter = 0;
     int tmp_step = 0;
+    int while_cnt = 0;
+    unsigned int error_test = 10;
     while (send_traffic)
     {
-        // for (int i = 0; i < flow_index; i++)
         for (int i = 0; i < FLOW_NUM; i++)
         {
             got_no_zero = 0;
             usleep(report_period * 1000); // 20 * 1000 = 20000 us = 20 ms
             while (!got_no_zero && send_traffic)
             {
-                // ret1 = get_orca_info(sock_for_cnt[i], &orca_info);
-                // if (ret1 < 0)
-                // {
-                //     DBGMARK(0, 0, "setsockopt: for index:%d flow_index:%d TCP_C2TCP ... %s (ret1:%d)\n", i, flow_index, strerror(errno), ret1);
-                //     return ((void *)0);
-                // }
-                // int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-                // if (sock_fd < 0)
-                // {
-                //     perror("socket");
-                //     exit(EXIT_FAILURE);
-                // }
                 info_length = sizeof(info);
-                if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info, &info_length))
+                if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info, &info_length) < 0)
                 {
+                    DBGMARK(5, 1, "\n!!!!!!!!!!!!!!!!!!!!!!!!!!getsockopt11");
                     perror("getsockopt");
                 }
                 // if (orca_info.avg_urtt > 0)
                 // DBGMARK(0, 0, "info.tcpi_rtt = %lf \n", (double)info.tcpi_rtt);
-                DBGMARK(0, 0, "info.tcpi_snd_cwnd = %lf \n", (double)info.tcpi_snd_cwnd);
-                DBGMARK(0, 0, "info.tcpi_rtt = %u \n", info.tcpi_rtt);
                 if (info.tcpi_rtt >= 0)
                 {
-                    DBGMARK(5, 1, "TCPI_RTT>0 extract the info and set cwnd \n");
+                    // DBGMARK(DBGSERVER, 1, "TCPI_RTT>0 extract the info and set cwnd \n");
                     t1 = timestamp();
 
                     double time_delta = (double)(t1 - t0) / 1000000.0;
                     // double delay = (double)orca_info.avg_urtt / 1000.0;
                     double delay = (double)info.tcpi_rtt / 1000.0;
                     // min_rtt_ = (double)(orca_info.min_rtt / 1000.0);
-                    // ？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？
-                    min_rtt_ = (double)(20000);
+                    // ？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？？
+                    min_rtt_ = (double)read_min_rtt(i);
                     // lost_bytes = (double)(orca_info.lost_bytes);
                     lost_bytes = (double)(info.tcpi_lost);
                     // pacing_rate = (double)(orca_info.pacing_rate);
@@ -699,32 +704,41 @@ void *CntThread(void *information)
                     max_packets_out = (double)(info.tcpi_last_data_sent);
 
                     report_period = 20;
-                    if (!slow_start_passed)
-                        // Just for the first Time
-                        // slow_start_passed = (orca_info.snd_ssthresh < orca_info.cwnd) ? 1 : 0;
-                        slow_start_passed = (info.tcpi_snd_ssthresh < info.tcpi_snd_cwnd) ? 1 : 0;
-                    if (!slow_start_passed)
+                    if (!slow_start_passed) // 如果慢启动还没过的话，若当前cwnd的大于阈值，则设置为1
                     {
-                        // got_no_zero=1;
-                        // tcp_info_pre = orca_info;
+                        slow_start_passed = (info.tcpi_snd_ssthresh < info.tcpi_snd_cwnd) ? 1 : 0;
+                        // DBGMARK(5, 1, "\n当前的cwnd %u，cwnd阈值下降到%u \n", info.tcpi_snd_cwnd, info.tcpi_snd_ssthresh);
                         info_pre = info;
                         t0 = timestamp();
-
-                        // target_ratio = 1.1 * orca_info.cwnd;
-                        target_ratio = 1.1 * info.tcpi_snd_cwnd;
-
-                        // target_ratio = 50;
-                        // ret1 = setsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_CWND, &target_ratio, sizeof(target_ratio));
-                        // if (ret1 < 0)
-                        // {
-                        //     DBGPRINT(0, 0, "setsockopt: for index:%d flow_index:%d ... %s (ret1:%d)\n", i, flow_index, strerror(errno), ret1);
-                        //     return ((void *)0);
-                        // }
-                        set_cwnd(target_ratio, i);
+                        if (slow_start_passed)
+                            DBGMARK(5, 1, "slow start passed!\n");
                         continue;
                     }
+                    // if (!slow_start_passed) // 如果慢启动还没过的话，那么就是设置当前cwnd的1.1倍
+                    // {
+                    //     // got_no_zero=1;
+                    //     // tcp_info_pre = orca_info;
+                    //     info_pre = info;
+                    //     t0 = timestamp();
+
+                    //     // target_ratio = 1.1 * orca_info.cwnd;
+                    //     target_ratio = 1.1 * info.tcpi_snd_cwnd;
+                    //     DBGMARK(5, 1, "\n当前的要设置的cwnd %u，当前的cwnd阈值已经下降到%u \n", target_ratio, info.tcpi_snd_ssthresh);
+                    //     // set_cwnd(target_ratio, i);
+                    //     // if(set_if_out) return ((void *)0);
+                    //     continue;
+                    // }
+                    // if(slow_start_passed){
+                    //     DBGMARK(5, 1, "\n 已经过了slow_start!!!!!!!!! %u \n", target_ratio);
+                    //     return ((void *)0);
+                    // }
+                    double anole_thr = 0;
+                    if (time_delta)
+                    {
+                        anole_thr = (double)info.tcpi_snd_cwnd / time_delta;
+                    }
                     sprintf(message, "%d %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f %.7f",
-                            msg_id, delay, (double)((double)info.tcpi_snd_cwnd / time_delta), (double)10.0, (double)time_delta,
+                            msg_id, delay, anole_thr, (double)10.0, (double)time_delta,
                             (double)target, (double)info.tcpi_snd_cwnd, pacing_rate, lost_rate, srtt_ms, snd_ssthresh, packets_out, retrans_out, max_packets_out, (double)info.tcpi_snd_mss, min_rtt_);
                     memcpy(shared_memory, message, sizeof(message));
                     if ((duration_steps != 0))
@@ -755,10 +769,12 @@ void *CntThread(void *information)
             }
             /******************************************逻辑***************************************/
             /*************************************Evaluaiton stage********************************/
-
+            while_cnt++;
+            DBGMARK(5, 1, "\n这是第 %u 次在循环\n", while_cnt);
             info_length = sizeof(info_cur);
-            if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info_cur, &info_length) == 0)
+            if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info_cur, &info_length) < 0)
             {
+                DBGMARK(5, 1, "\ngetsockopt_error\n");
                 perror("getsockopt");
             }
             cur_cl_cwnd = info_cur.tcpi_snd_cwnd;
@@ -769,29 +785,94 @@ void *CntThread(void *information)
             {
                 pre_id_tmp = atoi(num);
                 cur_rl_cwnd = atoi(alpha);
-                cur_rl_cwnd = atoi(alpha) * get_cur_cwnd(i) / 100;
+                if (pre_id != pre_id_tmp /*&& target_ratio!=OK_SIGNAL*/)
+                {
+                    got_alpha = true;
+                    pre_id = pre_id_tmp;
+                    // cur_rl_cwnd = atoi(alpha) * get_cur_cwnd(i) / 100;
+                    cur_rl_cwnd = atoi(alpha) * cur_cl_cwnd / 100;
+                }
+
+                if (target_ratio < MIN_CWND)
+                    target_ratio = MIN_CWND;
             }
-
+            // std::random_device rd;  // 随机数种子
+            // std::mt19937 gen(rd()); // 基于 Mersenne Twister 的生成器
+            // // 定义随机数分布范围 [150, 200]
+            // std::uniform_int_distribution<> distrib(150, 200);
+            // // 生成随机数
+            // cur_rl_cwnd = distrib(gen);
+            DBGMARK(5, 1, "\ncl = %u, rl = %u, prev = %u\n", cur_cl_cwnd, cur_rl_cwnd, cur_prev_cwnd);
+            // error_test = error_test * 1.1;
+            // set_cwnd(error_test, i);
+            // usleep(80 * 1000); // 0.5RTT
             // 这里应该小流先开始，先简略，先cl后rl
-            // 先cl
-            set_cwnd(cur_cl_cwnd, i);
-            usleep(10 * 1000); // 0.5RTT
 
-            // 后rl
-            set_cwnd(cur_rl_cwnd, i);
-            usleep(10 * 1000); // 0.5RTT
-            // Uprev
-            uprev = utility_value_module(cur_prev_cwnd, &is_right_prev, i);
+            // cl小的情况
+            if(cur_cl_cwnd <= cur_rl_cwnd){
+                // 先cl 总共0.5RTT
+                set_cwnd(cur_cl_cwnd, i);
+                ONE_WAY_DELAY = read_cur_rtt(i) / 2;
+                usleep(ONE_WAY_DELAY); // 0.5RTT
 
-            // prev 1个RTT
-            set_cwnd(cur_prev_cwnd, i);
-            usleep(10 * 1000); // 0.5RTT
-            // Ucl
-            ucl = utility_value_module(cur_cl_cwnd, &is_right_cl, i);
-            usleep(10 * 1000); // 0.5RTT
-            // Url
-            url = utility_value_module(cur_rl_cwnd, &is_right_rl, i);
+                // 后rl 总共0.5RTT
+                set_cwnd(cur_rl_cwnd, i);
+                ONE_WAY_DELAY = read_cur_rtt(i) / 2;
+                usleep(ONE_WAY_DELAY * (2 * epsilon - 1)); // 按照epsilon来
+                // Uprev
+                DBGMARK(5, 1, "\n!!!!!!!!!!!!!!!!!!!!!Uprev!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+                uprev = utility_value_module(cur_prev_cwnd, &is_right_prev, i);
+                print_rtt(i);
+                usleep(ONE_WAY_DELAY * (2 - 2 * epsilon)); // 按照epsilon来
 
+                // prev 1个RTT
+                set_cwnd(cur_prev_cwnd, i);
+                ONE_WAY_DELAY = read_cur_rtt(i) / 2;
+                usleep(ONE_WAY_DELAY * epsilon); // 0.25RTT
+                // Ucl
+                DBGMARK(5, 1, "\n******************Ucl********************\n");
+                ucl = utility_value_module(cur_cl_cwnd, &is_right_cl, i);
+                print_rtt(i);
+                usleep(ONE_WAY_DELAY); // 0.5RTT
+                
+                // Url
+                DBGMARK(5, 1, "\n&&&&&&&&&&&&&&&&&&Url&&&&&&&&&&&&&&&&&&&&\n");
+                url = utility_value_module(cur_rl_cwnd, &is_right_rl, i);
+                print_rtt(i);
+                usleep(ONE_WAY_DELAY * (1 - epsilon)); // 0.25RTT
+            }else{ // rl小的情况
+                // 先rl 总共0.5RTT
+                set_cwnd(cur_rl_cwnd, i);
+                ONE_WAY_DELAY = read_cur_rtt(i) / 2;
+                usleep(ONE_WAY_DELAY); // 0.5RTT
+
+                // 后cl 总共0.5RTT
+                set_cwnd(cur_cl_cwnd, i);
+                ONE_WAY_DELAY = read_cur_rtt(i) / 2;
+                usleep(ONE_WAY_DELAY * (2 * epsilon - 1));  // 按照epsilon来
+                // Uprev
+                DBGMARK(5, 1, "\n!!!!!!!!!!!!!!!!!!!!!Uprev!!!!!!!!!!!!!!!!!!!!!!!!!\n");
+                uprev = utility_value_module(cur_prev_cwnd, &is_right_prev, i);
+                print_rtt(i);
+                usleep(ONE_WAY_DELAY * (2 - 2 * epsilon)); // 按照epsilon来
+
+                // prev 1个RTT
+                set_cwnd(cur_prev_cwnd, i);
+                ONE_WAY_DELAY = read_cur_rtt(i) / 2;
+                usleep(ONE_WAY_DELAY * epsilon); // 0.25RTT
+                // Url
+                DBGMARK(5, 1, "\n&&&&&&&&&&&&&&&&&&Url&&&&&&&&&&&&&&&&&&&&\n");
+                url = utility_value_module(cur_rl_cwnd, &is_right_rl, i);
+                print_rtt(i);
+                usleep(ONE_WAY_DELAY); // 0.5RTT
+                
+                // Url
+                DBGMARK(5, 1, "\n******************Ucl********************\n");
+                ucl = utility_value_module(cur_cl_cwnd, &is_right_cl, i);
+                print_rtt(i);
+                usleep(ONE_WAY_DELAY * (1 - epsilon)); // 0.25RTT
+            }
+            
             /*************************************计算最优速率********************************/
             int sum_right = 0;
             if (is_right_cl)
@@ -806,25 +887,57 @@ void *CntThread(void *information)
             confidence_value_module(url, u_optimal, &eta_rl);
 
             /**************************Probing Stage || Acceleration Stage************************/
+            DBGMARK(5, 1, "\nUcl = %.4lf, Url = %.4lf, Uprev = %.4lf\n", ucl, url, uprev);
+            DBGMARK(5, 1, "\neta_cl = %.4lf, eta_rl = %.4lf\n", eta_cl, eta_rl);
             if (eta_cl >= ETA_OFF && eta_rl >= ETA_OFF)
             { // Probing Stage
+                info_length = sizeof(info);
+                if (getsockopt(sock_for_cnt[i], IPPROTO_TCP, TCP_INFO, &info, &info_length) < 0)
+                {
+                    DBGMARK(5, 1, "\n!!!!!!!!!!!!!!!!!!!!!!!!!!getsockopt11");
+                    perror("getsockopt");
+                }
                 set_cwnd(optimal_cwnd, i);
                 cur_prev_cwnd = optimal_cwnd;
-                usleep(40 * 1000); // 2RTT
+                // usleep(ONE_WAY_DELAY * 4 * 1000); // 2RTT
+                ONE_WAY_DELAY = read_cur_rtt(i) / 2;
+                usleep(ONE_WAY_DELAY);
+                ONE_WAY_DELAY = read_cur_rtt(i) / 2;
+                usleep(ONE_WAY_DELAY);
+                ONE_WAY_DELAY = read_cur_rtt(i) / 2;
+                usleep(ONE_WAY_DELAY);
+                ONE_WAY_DELAY = read_cur_rtt(i) / 2;
+                usleep(ONE_WAY_DELAY);
             }
             else
             { // Acceleration Stage 测试的时候可以暂时先不加
-                double eta_x;
-                if (eta_cl < ETA_OFF)
-                    eta_x = eta_cl;
-                else
-                    eta_x = eta_rl;
-                while (eta_x < ETA_ON)
-                {
-                    eta_x += DELTA_ETA;
+                // 这样写考虑了两个速率当时失效的情况
+                bool flag_cl, flag_rl;
+                if(eta_cl < ETA_OFF) flag_cl = false;
+                else flag_cl = true;
+                if(eta_rl < ETA_OFF) flag_rl = false;
+                else flag_rl = true;
+
+                while(!flag_cl || !flag_rl){ 
+                    if(!flag_cl){
+                        eta_cl += DELTA_ETA;
+                        if(eta_cl >= ETA_ON) flag_cl = true;
+                    }
+                    if(!flag_rl){
+                        eta_rl += DELTA_ETA;
+                        if(eta_rl >= ETA_ON) flag_rl = true;
+                    }
+                    __u32 minrtt = read_min_rtt(i);
+                    __u32 currtt = read_cur_rtt(i);
+                    if(double(1.0 * currtt / minrtt) > 1 + MU) optimal_cwnd -= 1;
+                    else optimal_cwnd += 1;
+                    DBGMARK(5, 1, "\nminrtt = %u, currtt = %u, 比例 = %.4lf\n", minrtt, currtt, double(1.0 * minrtt / currtt));
+                    
                     set_cwnd(optimal_cwnd, i);
                     cur_prev_cwnd = optimal_cwnd;
-                    // confidence_value_module()
+                    ONE_WAY_DELAY = read_cur_rtt(i) / 2;
+                    usleep(ONE_WAY_DELAY);
+                    DBGMARK(5, 1, "\neta_cl = %.4lf, eta_rl = %.4lf\n", eta_cl, eta_rl);
                 }
             }
         }
